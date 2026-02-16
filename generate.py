@@ -33,6 +33,13 @@ def load_from_pretrained(model_path: str, model_config_path: str):
     ssm_cfg = SSMConfig(**config.pop("ssm_cfg"))
     hnet_cfg = HNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
 
+    print("-" * 30)
+    print("Model Config:")
+    print(f"attn_cfg: {attn_cfg}")
+    print(f"ssm_cfg: {ssm_cfg}")
+    print(f"hnet_cfg: {hnet_cfg}")
+    print("-" * 30)
+
     # Create model
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = HNetForCausalLM(hnet_cfg, device=device, dtype=torch.bfloat16)
@@ -120,6 +127,39 @@ def generate(
         logits = output.logits[0, -1, :] / temperature
 
 
+def run_generate(model, prompt, args, tokenizer):
+    print(
+        f"\nGenerating (max_tokens={args.max_tokens}, temperature={args.temperature}, top_p={args.top_p})"
+    )
+
+    print(f"\033[92m{prompt}\033[0m", end="")
+    token_count = 0
+    buf = []
+
+    for token in generate(
+        model,
+        prompt,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+    ):
+        buf.append(token)
+        token_count += 1
+
+        decoded = None
+        res = None
+        for j in range(1, min(len(buf), 4)):
+            try:
+                res = tokenizer.decode(buf[:j])
+                decoded = j
+            except:
+                pass
+
+        if res is not None:
+            print(res, end="", flush=True)
+            buf = buf[decoded:]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate text from an H-Net model")
     parser.add_argument(
@@ -152,17 +192,33 @@ def main():
         default=1.0,
         help="Top-p sampling parameter (default: 1.0)",
     )
+    parser.add_argument(
+        "--interactive",
+        action='store_true',
+        help="Enable interactive mode",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default="The capital of Brazil is ",
+        help="Prompt to be used in non-interactive mode",
+    )
     args = parser.parse_args()
 
     print("Loading model...")
     try:
         model = load_from_pretrained(args.model_path, args.config_path)
         print("Model loaded successfully!")
+        print(f"Model: {model}")
     except Exception as e:
         print(f"Error loading model: {e}")
         sys.exit(1)
 
     tokenizer = ByteTokenizer()
+
+    if not args.interactive and args.prompt:
+        run_generate(model, args.prompt, args, tokenizer)
+        return
 
     while True:
         prompt = input("\nPrompt: ").strip()
@@ -170,36 +226,7 @@ def main():
         if not prompt:
             continue
 
-        print(
-            f"\nGenerating (max_tokens={args.max_tokens}, temperature={args.temperature}, top_p={args.top_p})"
-        )
-
-        print(f"\033[92m{prompt}\033[0m", end="")
-        token_count = 0
-        buf = []
-
-        for token in generate(
-            model,
-            prompt,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-        ):
-            buf.append(token)
-            token_count += 1
-
-            decoded = None
-            res = None
-            for j in range(1, min(len(buf), 4)):
-                try:
-                    res = tokenizer.decode(buf[:j])
-                    decoded = j
-                except:
-                    pass
-
-            if res is not None:
-                print(res, end="", flush=True)
-                buf = buf[decoded:]
+        run_generate(model, prompt, args, tokenizer)
 
 
 if __name__ == "__main__":
