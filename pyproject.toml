@@ -19,6 +19,7 @@ dependencies = [
     "optree",
     "regex",
     "omegaconf",
+    "datasets"
 ]
 [project.urls]
 Repository = "https://github.com/goombalab/hnet"
