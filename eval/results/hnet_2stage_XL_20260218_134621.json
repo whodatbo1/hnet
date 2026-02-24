@@ -1,0 +1,20 @@
+{
+  "model_path": "checkpoints/hnet_2stage_XL/hnet_2stage_XL.pt",
+  "config_path": "configs/hnet_2stage_XL.json",
+  "tasks": [
+    "lambada_openai"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260218_134621",
+  "results": {
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 10.009926119933045,
+      "perplexity_stderr,none": 0.2985438717308654,
+      "acc,none": 0.502619833106928,
+      "acc_stderr,none": 0.006965882034204917
+    }
+  }
+}

@@ -20,6 +20,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime
 
 import torch
 import torch.distributed as dist
@@ -28,87 +29,12 @@ from omegaconf import OmegaConf
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy, MixedPrecision
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from torch.utils.data import DataLoader, IterableDataset
-
 from hnet.models.mixer_seq import HNetForCausalLM
-from hnet.models.config_hnet import AttnConfig, SSMConfig, HNetConfig
+from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetConfig
 from hnet.modules.block import Block
-from hnet.utils.tokenizers import ByteTokenizer
+from hnet.utils.data import create_dataloaders
 from hnet.utils.train import load_balancing_loss, group_params
-
-
-# ---------------------------------------------------------------------------
-# Dataset
-# ---------------------------------------------------------------------------
-
-class SyntheticByteDataset(IterableDataset):
-    """Generates random byte sequences for testing/debugging without network access."""
-
-    def __init__(self, seq_len, vocab_size=256, seed=42):
-        self.seq_len = seq_len
-        self.vocab_size = vocab_size
-        self.seed = seed
-
-    def __iter__(self):
-        rng = torch.Generator()
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        rng.manual_seed(self.seed + rank)
-        while True:
-            yield torch.randint(0, self.vocab_size, (self.seq_len + 1,), generator=rng)
-
-
-class PackedByteDataset(IterableDataset):
-    """Streams text from HuggingFace, encodes to bytes, packs into fixed-length chunks."""
-
-    def __init__(self, dataset_name, seq_len, tokenizer, seed=42, dataset_config=None,
-                 shuffle_buffer=1000):
-        self.dataset_name = dataset_name
-        self.dataset_config = dataset_config
-        self.seq_len = seq_len
-        self.tokenizer = tokenizer
-        self.seed = seed
-        self.shuffle_buffer = shuffle_buffer
-
-    def __iter__(self):
-        from datasets import load_dataset
-
-        worker_info = torch.utils.data.get_worker_info()
-        worker_seed = self.seed
-        if worker_info is not None:
-            worker_seed += worker_info.id
-
-        # In distributed training, each rank skips to different documents
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-
-        load_kwargs = dict(split="train", streaming=True)
-        if self.dataset_config is not None:
-            ds = load_dataset(self.dataset_name, self.dataset_config, **load_kwargs)
-        else:
-            ds = load_dataset(self.dataset_name, **load_kwargs)
-
-        if self.shuffle_buffer > 0:
-            ds = ds.shuffle(seed=worker_seed, buffer_size=self.shuffle_buffer)
-
-        buffer = []
-        for i, example in enumerate(ds):
-            # Shard across ranks by skipping documents
-            if i % world_size != rank:
-                continue
-
-            text = example.get("text", "")
-            if not text:
-                continue
-
-            encoded = self.tokenizer.encode([text], add_bos=True, add_eos=True)[0]
-            token_ids = encoded["input_ids"].tolist()
-            buffer.extend(token_ids)
-
-            while len(buffer) >= self.seq_len + 1:
-                # +1 because we need seq_len inputs and seq_len targets (shifted by 1)
-                chunk = buffer[: self.seq_len + 1]
-                buffer = buffer[self.seq_len + 1 :]
-                yield torch.tensor(chunk, dtype=torch.long)
+from hnet.utils.eval import bits_per_byte, compression_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +183,114 @@ def load_config(argv=None):
 
 
 # ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def validate(model, val_dataloader, cfg, step, device):
+    """Run validation and return metrics dict.
+
+    Computes:
+    - val/loss: average cross-entropy loss
+    - val/bpb: bits-per-byte
+    - val/lb_loss: average load-balancing loss
+    - val/stage_*/F_selected, val/stage_*/G_avg_boundary_prob: compression metrics
+    """
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    distributed = dist.is_initialized()
+
+    was_training = model.training
+    model.eval()
+
+    total_ce_loss = torch.tensor(0.0, device=device)
+    total_lb_loss = torch.tensor(0.0, device=device)
+    total_bytes = 0
+    num_batches = 0
+    all_compression_metrics = {}
+
+    val_batches = cfg.get("val_batches", 50)
+
+    for batch_idx, batch in enumerate(val_dataloader):
+        if batch_idx >= val_batches:
+            break
+
+        batch = batch.to(device)
+        input_ids = batch[:, :-1]
+        targets = batch[:, 1:]
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            output = model(input_ids, mask=None)
+            logits = output.logits
+
+            # Sum (not mean) CE loss so we can compute BPB correctly
+            ce_loss_sum = nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+                reduction="sum",
+            )
+            # Also track mean for logging convenience
+            ce_loss_mean = nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+            )
+
+            lb_loss = torch.tensor(0.0, device=device)
+            if output.bpred_output:
+                for router_out in output.bpred_output:
+                    lb_loss = lb_loss + load_balancing_loss(
+                        router_out, N=cfg.downsample_n
+                    )
+                lb_loss = lb_loss / len(output.bpred_output)
+
+                # Accumulate compression metrics
+                batch_comp = compression_metrics(output.bpred_output)
+                for k, v in batch_comp.items():
+                    all_compression_metrics.setdefault(k, []).append(v)
+
+        total_ce_loss += ce_loss_sum
+        total_lb_loss += ce_loss_mean
+        total_bytes += targets.numel()
+        num_batches += 1
+
+    if num_batches == 0:
+        model.train(was_training)
+        return {}
+
+    # Aggregate across ranks
+    if distributed:
+        stats = torch.tensor([total_ce_loss, total_lb_loss, float(total_bytes), float(num_batches)], device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_ce_loss = stats[0]
+        total_lb_loss_sum = stats[1]
+        total_bytes = int(stats[2].item())
+        num_batches = int(stats[3].item())
+    else:
+        total_lb_loss_sum = total_lb_loss
+
+    bpb = bits_per_byte(total_ce_loss, total_bytes)
+    avg_loss = (total_ce_loss / total_bytes).item()
+    avg_lb = (total_lb_loss_sum / num_batches).item()
+
+    metrics = {
+        "val/loss": avg_loss,
+        "val/bpb": bpb,
+        "val/lb_loss": avg_lb,
+        "step": step,
+    }
+
+    # Average compression metrics
+    for k, vals in all_compression_metrics.items():
+        metrics[f"val/{k}"] = sum(vals) / len(vals)
+
+    print_rank0(
+        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f}",
+        rank,
+    )
+
+    model.train(was_training)
+    return metrics
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -285,7 +319,8 @@ def main():
 
     attn_cfg = AttnConfig(**model_config.pop("attn_cfg"))
     ssm_cfg = SSMConfig(**model_config.pop("ssm_cfg"))
-    hnet_cfg = HNetConfig(**model_config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
+    routing_cfg = RoutingConfig(**model_config.pop("routing_cfg"))
+    hnet_cfg = HNetConfig(**model_config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg, routing_cfg=routing_cfg)
 
     print_rank0(f"Model config: {hnet_cfg}", rank)
     print_rank0(f"Train config: {OmegaConf.to_yaml(cfg)}", rank)
@@ -363,27 +398,8 @@ def main():
     betas = tuple(cfg.betas) if cfg.get("betas") else (0.9, 0.95)
     optimizer = torch.optim.AdamW(param_groups, betas=betas)
 
-    # ---- Dataset & DataLoader ----
-    if cfg.dataset == "synthetic":
-        print_rank0("Using synthetic random data (for testing only)", rank)
-        dataset = SyntheticByteDataset(seq_len=cfg.seq_len, seed=cfg.seed)
-    else:
-        tokenizer = ByteTokenizer()
-        dataset = PackedByteDataset(
-            dataset_name=cfg.dataset,
-            dataset_config=cfg.get("dataset_config", None),
-            seq_len=cfg.seq_len,
-            tokenizer=tokenizer,
-            seed=cfg.seed,
-            shuffle_buffer=cfg.get("shuffle_buffer", 1000),
-        )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
+    # ---- Data ----
+    dataloader, val_dataloader = create_dataloaders(cfg)
 
     # ---- Resume ----
     start_step = 0
@@ -392,9 +408,16 @@ def main():
 
     # ---- Wandb ----
     wandb_project = cfg.get("wandb_project", None)
+    wandb_run_name = cfg.get("wandb_run_name", "train_hnet_unknown") + "_" + datetime.now().strftime("%Y-%d-%m-%H-%M-%S")
     if wandb_project and rank == 0:
         import wandb
-        wandb.init(project=wandb_project, entity="marko-ivanovv", tags=["train"], config=OmegaConf.to_container(cfg))
+        wandb.init(
+            name=wandb_run_name,
+            project=wandb_project,
+            entity="marko-ivanovv",
+            tags=["train"],
+            config=OmegaConf.to_container(cfg)
+        )
 
     # ---- Training loop ----
     effective_batch = cfg.batch_size * cfg.grad_accum_steps * world_size
@@ -413,6 +436,7 @@ def main():
     accum_loss = 0.0
     accum_lb_loss = 0.0
     accum_tokens = 0
+    total_tokens = 0
     t_start = time.time()
     print(f"Starting training at {t_start}")
     data_iter = iter(dataloader)
@@ -445,7 +469,7 @@ def main():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 # mask=None triggers packed mode in the model
                 output = model(input_ids, mask=None)
-                print(f"Received model output: {model}")
+                # print(f"Received model output: {output}")
 
                 # AR cross-entropy loss
                 logits = output.logits  # (B, seq_len, vocab_size)
@@ -457,8 +481,10 @@ def main():
 
                 # Load balancing loss across routing stages
                 lb_loss = torch.tensor(0.0, device=device)
+                # print(f"output.bpred_output: {output.bpred_output}")
                 if output.bpred_output:
                     for router_out in output.bpred_output:
+                        # print(f"router_out: {router_out}")
                         lb_loss = lb_loss + load_balancing_loss(
                             router_out, N=cfg.downsample_n
                         )
@@ -494,6 +520,7 @@ def main():
             avg_lb = accum_lb_loss / cfg.grad_accum_steps
             elapsed = time.time() - t_start
             tokens_per_sec = accum_tokens / elapsed if elapsed > 0 else 0
+            total_tokens += accum_tokens
             current_lr = optimizer.param_groups[0]["lr"]
 
             if distributed:
@@ -518,6 +545,7 @@ def main():
                     "lr": current_lr,
                     "tokens_per_sec": tokens_per_sec,
                     "step": step,
+                    "total_tokens": total_tokens
                 })
 
             accum_loss = 0.0
@@ -525,6 +553,11 @@ def main():
             accum_tokens = 0
             t_start = time.time()
 
+        if cfg.get("validate_every", 0) > 0 and step % cfg.validate_every == 0:
+            val_metrics = validate(model, val_dataloader, cfg, step, device)
+            if val_metrics and wandb_project and rank == 0:
+                import wandb
+                wandb.log(val_metrics)
         # Checkpointing
         if step % cfg.save_every == 0:
             save_checkpoint(model, optimizer, step, cfg, cfg.checkpoint_dir)

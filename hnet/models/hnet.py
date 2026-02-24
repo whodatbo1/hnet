@@ -95,7 +95,10 @@ class HNet(nn.Module):
             self.add_module(_name, _sub_model)
 
         if not self.is_innermost:
-            self.routing_module = RoutingModule(self.d_model, **factory_kwargs)
+            self.routing_module = RoutingModule(
+                self.d_model,
+                config.routing_cfg,
+                **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
 

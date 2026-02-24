@@ -18,6 +18,12 @@ class SSMConfig:
     d_state: int = 128
     chunk_size: int = 256
 
+@dataclass
+class RoutingConfig:
+    
+    multiheaded: bool = False
+    num_heads: int = 4
+    window_size: int = 8
 
 @dataclass
 class HNetConfig:
@@ -29,3 +35,4 @@ class HNetConfig:
     ssm_cfg: SSMConfig = field(default_factory=SSMConfig)
     attn_cfg: AttnConfig = field(default_factory=AttnConfig)
     tie_embeddings: bool = False
+    routing_cfg: RoutingConfig = field(default_factory=RoutingConfig)

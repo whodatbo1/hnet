@@ -9,6 +9,7 @@ from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import (
     AttnConfig,
     SSMConfig,
+    RoutingConfig,
     HNetConfig,
 )
 from hnet.utils.tokenizers import ByteTokenizer
@@ -31,7 +32,8 @@ def load_from_pretrained(model_path: str, model_config_path: str):
     # Create config objects
     attn_cfg = AttnConfig(**config.pop("attn_cfg"))
     ssm_cfg = SSMConfig(**config.pop("ssm_cfg"))
-    hnet_cfg = HNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg)
+    routing_cfg = RoutingConfig(**config.pop("routing_cfg"))
+    hnet_cfg = HNetConfig(**config, attn_cfg=attn_cfg, ssm_cfg=ssm_cfg, routing_cfg=routing_cfg)
 
     print("-" * 30)
     print("Model Config:")
@@ -44,6 +46,14 @@ def load_from_pretrained(model_path: str, model_config_path: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = HNetForCausalLM(hnet_cfg, device=device, dtype=torch.bfloat16)
     model.eval()
+
+    # Resolve latest.pt pointer -> model_step{N}.pt
+    import os
+    if os.path.basename(model_path) == "latest.pt":
+        ptr = torch.load(model_path, map_location="cpu")
+        step = ptr["step"]
+        model_path = os.path.join(os.path.dirname(model_path), f"model_step{step}.pt")
+        print(f"Resolved latest.pt -> {model_path}")
 
     # Load checkpoint
     major, minor = map(int, torch.__version__.split('.')[:2])

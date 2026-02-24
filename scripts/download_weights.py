@@ -8,8 +8,18 @@ import os
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
+MODEL_NAMES = [
+    "hnet_1stage_L",
+    "hnet_1stage_XL",
+    "hnet_2stage_L",
+    "hnet_2stage_XL",
+    "hnet_2stage_XL_chinese",
+    "hnet_2stage_XL_code",
+]
 
-def download_hnet_weights(output_dir: str = "checkpoints"):
+REPOS = ["cartesia-ai/" + model_name for model_name in MODEL_NAMES]
+
+def download_hnet_weights(output_dir: str = "checkpoints", model: str = "hnet_1stage_L"):
     """
     Download Hnet model weights from Hugging Face.
 
@@ -21,13 +31,13 @@ def download_hnet_weights(output_dir: str = "checkpoints"):
     output_path.mkdir(parents=True, exist_ok=True)
 
     print(f"Downloading Hnet model weights to {output_path.absolute()}...")
-    print("Model: cartesia-ai/hnet_2stage_XL")
+    print(f"Model: cartesia-ai/{model}")
 
     try:
         # Download the model
         model_path = snapshot_download(
-            repo_id="cartesia-ai/hnet_2stage_XL",
-            local_dir=output_path / "hnet_2stage_XL",
+            repo_id=f"cartesia-ai/{model}",
+            local_dir=output_path / model,
             local_dir_use_symlinks=False,
         )
 
@@ -52,5 +62,24 @@ if __name__ == "__main__":
         help="Directory to save model weights (default: checkpoints)",
     )
 
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="hnet_1stage_L",
+        choices=MODEL_NAMES,
+        help="Model name",
+    )
+
+    parser.add_argument(
+        "--download-all",
+        action="store_true",
+        default=False
+    )
+
     args = parser.parse_args()
-    download_hnet_weights(args.output_dir)
+    if args.download_all:
+        print("download-all flag set to true. Downloading all model checkpoints...")
+        for model in MODEL_NAMES:
+            download_hnet_weights(args.output_dir, model)
+    else:        
+        download_hnet_weights(args.output_dir, args.model)

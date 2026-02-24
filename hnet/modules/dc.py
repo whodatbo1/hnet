@@ -10,6 +10,8 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 from hnet.modules.utils import get_seq_idx
 
+from hnet.models.config_hnet import RoutingConfig
+
 
 @dataclass
 class RoutingModuleOutput:
@@ -46,12 +48,27 @@ class DeChunkState:
 
 class RoutingModule(nn.Module):
 
-    def __init__(self, d_model, device=None, dtype=None):
+    def __init__(self, d_model, routing_cfg: RoutingConfig, device=None, dtype=None):
+
         self.d_model = d_model
+        self.multiheaded = routing_cfg.multiheaded
+        
+        if self.multiheaded:
+            assert d_model % routing_cfg.num_heads == 0, "d_model should be divisible num_heads"
+            self.num_heads = routing_cfg.num_heads
+            self.head_dim = d_model // self.num_heads
+            self.window_size = routing_cfg.window_size
+
         factory_kwargs = {"device": device, "dtype": dtype}
+        
         super().__init__()
+
         self.q_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
         self.k_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
+
+        if self.multiheaded:
+            self.head_gate = nn.Linear(d_model * self.window_size, self.num_heads, bias=False, **factory_kwargs)
+        
         with torch.no_grad():
             self.q_proj_layer.weight.copy_(torch.eye(d_model))
             self.k_proj_layer.weight.copy_(torch.eye(d_model))
@@ -83,11 +100,31 @@ class RoutingModule(nn.Module):
             # We are in packed mode, so hidden_states is (T, D). Make it (B, T, D)
             hidden_states = hidden_states.unsqueeze(0)
 
-        cos_sim = torch.einsum(
-            "b l d, b l d -> b l",
-            F.normalize(self.q_proj_layer(hidden_states[:, :-1]), dim=-1),
-            F.normalize(self.k_proj_layer(hidden_states[:, 1:]), dim=-1),
-        )
+        if self.multiheaded:    
+            B, T, D = hidden_states.shape
+
+            q = self.q_proj_layer(hidden_states[:, :-1])
+            k = self.k_proj_layer(hidden_states[:, 1:])
+            
+            q = rearrange(q, "... (h d) -> ... h d", d=self.head_dim)
+            k = rearrange(k, "... (h d) -> ... h d", d=self.head_dim)
+
+            q = F.normalize(q, dim=-1)
+            k = F.normalize(k, dim=-1)
+
+            cos_sim = torch.einsum("b l h d, b l h d -> b l h", q, k)
+
+            h_padded = F.pad(hidden_states, (0, 0, self.window_size - 1, 0))
+            windows = h_padded.unfold(1, self.window_size, 1).reshape(B, T, D * self.window_size)
+            gates = torch.sigmoid(self.head_gate(windows)) # (B, T, H)
+            cos_sim = (cos_sim * gates[:, 1:]).sum(dim=-1)
+        else:
+            cos_sim = torch.einsum(
+                "b l d, b l d -> b l",
+                F.normalize(self.q_proj_layer(hidden_states[:, :-1]), dim=-1),
+                F.normalize(self.k_proj_layer(hidden_states[:, 1:]), dim=-1),
+            )
+
         # this clamp should no-op as long as no precision issues are encountered
         boundary_prob = torch.clamp(((1 - cos_sim) / 2), min=0.0, max=1.0)
 
