@@ -14,5 +14,11 @@
         "rotary_emb_dim": [32, 48],
         "window_size": [1023, -1]
     },
-    "tie_embeddings": false
+    "tie_embeddings": false,
+    "routing_cfg": {
+        "multiheaded": false,
+        "num_heads": 4,
+        "window_size": 8,
+        "d_similarity": 2048
+    }
 }
