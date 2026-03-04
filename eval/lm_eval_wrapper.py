@@ -17,7 +17,7 @@ from lm_eval.api.model import TemplateLM
 from lm_eval.api.instance import Instance
 
 from generate import load_from_pretrained
-from hnet.utils.tokenizers import ByteTokenizer
+from hnet.utils.byte_tokenizer import ByteTokenizer
 
 
 class HNetLM(TemplateLM):

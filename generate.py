@@ -12,10 +12,10 @@ from hnet.models.config_hnet import (
     RoutingConfig,
     HNetConfig,
 )
-from hnet.utils.tokenizers import ByteTokenizer
+from hnet.utils.byte_tokenizer import ByteTokenizer
 
 
-def load_from_pretrained(model_path: str, model_config_path: str):
+def load_from_pretrained(model_path: str, model_config_path: str) -> HNetForCausalLM:
     """Load model from pretrained checkpoint.
 
     Args:

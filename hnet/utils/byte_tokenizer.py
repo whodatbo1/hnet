@@ -28,4 +28,3 @@ class ByteTokenizer:
         if isinstance(tokens, np.ndarray):
             tokens = tokens.tolist()
         return bytearray(tokens).decode("utf-8", **kwargs)
-

@@ -24,6 +24,7 @@ class RoutingConfig:
     multiheaded: bool = False
     num_heads: int = 4
     window_size: int = 8
+    d_similarity: int = -1
 
 @dataclass
 class HNetConfig:
