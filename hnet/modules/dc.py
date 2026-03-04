@@ -52,26 +52,30 @@ class RoutingModule(nn.Module):
 
         self.d_model = d_model
         self.multiheaded = routing_cfg.multiheaded
+        self.d_similarity = routing_cfg.d_similarity if routing_cfg.d_similarity > 0 else d_model
         
         if self.multiheaded:
-            assert d_model % routing_cfg.num_heads == 0, "d_model should be divisible num_heads"
+            assert self.d_similarity % routing_cfg.num_heads == 0, "d_similarity should be divisible by num_heads"
             self.num_heads = routing_cfg.num_heads
-            self.head_dim = d_model // self.num_heads
+            self.head_dim = self.d_similarity // self.num_heads
             self.window_size = routing_cfg.window_size
 
         factory_kwargs = {"device": device, "dtype": dtype}
         
         super().__init__()
 
-        self.q_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
-        self.k_proj_layer = nn.Linear(d_model, d_model, bias=False, **factory_kwargs)
+        self.q_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
+        self.k_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
 
         if self.multiheaded:
             self.head_gate = nn.Linear(d_model * self.window_size, self.num_heads, bias=False, **factory_kwargs)
         
         with torch.no_grad():
-            self.q_proj_layer.weight.copy_(torch.eye(d_model))
-            self.k_proj_layer.weight.copy_(torch.eye(d_model))
+            nn.init.zeros_(self.q_proj_layer.weight)
+            nn.init.zeros_(self.k_proj_layer.weight)
+            init_dim = min(d_model, self.d_similarity)
+            self.q_proj_layer.weight[:init_dim, :init_dim] = torch.eye(init_dim)
+            self.k_proj_layer.weight[:init_dim, :init_dim] = torch.eye(init_dim)
         self.q_proj_layer.weight._no_reinit = True
         self.k_proj_layer.weight._no_reinit = True
 
@@ -83,7 +87,7 @@ class RoutingModule(nn.Module):
             ),
         )
 
-    def forward(self, hidden_states, cu_seqlens=None, mask=None, inference_params=None):
+    def forward(self, hidden_states, cu_seqlens=None, mask=None, inference_params=None) -> RoutingModuleOutput:
         assert (mask is not None) or (
             cu_seqlens is not None
         ), "Either mask or cu_seqlens must be provided"
