@@ -21,6 +21,7 @@ import math
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -147,6 +148,15 @@ def load_config(argv=None):
     """Load training config from YAML file with CLI overrides.
 
     Precedence: CLI flags > YAML file > defaults (in default.yaml).
+
+    Model config fields (from the JSON) can be overridden using the ``--model.``
+    prefix, e.g.::
+
+        --model.d_model=[512,1024]
+        --model.routing_cfg.multiheaded=true
+        --model.attn_cfg.num_heads=[8,8]
+
+    All other ``--key value`` flags override the training YAML config.
     """
     parser = argparse.ArgumentParser(description="Train an HNet language model")
     parser.add_argument("--config", type=str, default="configs/train/default.yaml",
@@ -157,9 +167,11 @@ def load_config(argv=None):
     # Load YAML
     yaml_cfg = OmegaConf.load(args.config)
 
-    # Parse remaining CLI args as dotlist overrides
-    # Convert --kebab-case to snake_case for OmegaConf compatibility
-    cli_overrides = []
+    # Parse remaining CLI args as dotlist overrides.
+    # Args prefixed with --model. go to the model config; all others to train config.
+    # Convert --kebab-case to snake_case for OmegaConf compatibility.
+    train_overrides = []
+    model_overrides = []
     i = 0
     while i < len(remaining):
         arg = remaining[i]
@@ -167,17 +179,26 @@ def load_config(argv=None):
             key = arg[2:].replace("-", "_")
             if i + 1 < len(remaining) and not remaining[i + 1].startswith("--"):
                 val = remaining[i + 1]
-                cli_overrides.append(f"{key}={val}")
+                entry = f"{key}={val}"
                 i += 2
             else:
-                # Boolean flag (e.g. --resume, --activation-checkpointing)
-                cli_overrides.append(f"{key}=true")
+                entry = f"{key}=true"
                 i += 1
+            if key.startswith("model."):
+                model_overrides.append(entry[len("model."):])
+            elif key.startswith("train."):
+                train_overrides.append(entry[len("train."):])
+            else:
+                train_overrides.append(entry)
         else:
             i += 1
 
-    cli_cfg = OmegaConf.from_dotlist(cli_overrides)
+    cli_cfg = OmegaConf.from_dotlist(train_overrides)
     cfg = OmegaConf.merge(yaml_cfg, cli_cfg)
+
+    # Stash model overrides so main() can apply them to the JSON config.
+    if model_overrides:
+        cfg.model_overrides = OmegaConf.from_dotlist(model_overrides)
 
     return cfg
 
@@ -317,6 +338,14 @@ def main():
     with open(cfg.model_config, "r") as f:
         model_config = json.load(f)
 
+    # Apply any --model.* CLI overrides (deep-merge via OmegaConf)
+    if cfg.get("model_overrides"):
+        model_oc = OmegaConf.merge(OmegaConf.create(model_config), cfg.model_overrides)
+        model_config = OmegaConf.to_container(model_oc, resolve=True)
+        print_rank0(f"Model config overrides applied: {OmegaConf.to_yaml(cfg.model_overrides)}", rank)
+
+    model_config_raw = dict(model_config)  # snapshot before pops, for wandb logging
+
     attn_cfg = AttnConfig(**model_config.pop("attn_cfg"))
     ssm_cfg = SSMConfig(**model_config.pop("ssm_cfg"))
     routing_cfg = RoutingConfig(**model_config.pop("routing_cfg"))
@@ -399,7 +428,15 @@ def main():
     optimizer = torch.optim.AdamW(param_groups, betas=betas)
 
     # ---- Data ----
-    dataloader, val_dataloader = create_dataloaders(cfg)
+    dataloader, val_dataloader = create_dataloaders(
+        Path(cfg.data_dir),
+        cfg.get("dataset_config", "sample-10BT"),
+        cfg.seq_len,
+        cfg.seed,
+        cfg.get("val_batches", 50),
+        cfg.batch_size,
+        cfg.num_workers
+    )
 
     # ---- Resume ----
     start_step = 0
@@ -416,7 +453,10 @@ def main():
             project=wandb_project,
             entity="marko-ivanovv",
             tags=["train"],
-            config=OmegaConf.to_container(cfg)
+            config={
+                "train": OmegaConf.to_container(cfg),
+                "model": model_config_raw,
+            },
         )
 
     # ---- Training loop ----
@@ -461,7 +501,7 @@ def main():
             except StopIteration:
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
-            print("Got batch...")
+
             batch = batch.to(device)
             input_ids = batch[:, :-1]  # (B, seq_len)
             targets = batch[:, 1:]     # (B, seq_len)
@@ -516,8 +556,8 @@ def main():
 
         # Logging
         if step % cfg.log_every == 0:
-            avg_loss = accum_loss / cfg.grad_accum_steps
-            avg_lb = accum_lb_loss / cfg.grad_accum_steps
+            avg_loss = accum_loss / (cfg.grad_accum_steps * cfg.log_every)
+            avg_lb = accum_lb_loss / (cfg.grad_accum_steps * cfg.log_every)
             elapsed = time.time() - t_start
             tokens_per_sec = accum_tokens / elapsed if elapsed > 0 else 0
             total_tokens += accum_tokens
