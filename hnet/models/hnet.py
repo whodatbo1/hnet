@@ -53,6 +53,7 @@ class HNet(nn.Module):
 
         self.stage_idx = stage_idx
         self.d_model = config.d_model[stage_idx]
+        self.contrastive_loss = config.contrastive_loss
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -93,6 +94,17 @@ class HNet(nn.Module):
                 **factory_kwargs,
             )
             self.add_module(_name, _sub_model)
+        
+        if self.contrastive_loss:
+            self.contrastive_ar = Isotropic.standalone(
+                d_model=self.d_model,
+                d_intermediate=self.d_model,
+                ssm_cfg=config.ssm_cfg,
+                attn_cfg=config.attn_cfg,
+                arch_layout=config.contrastive_loss_arch,
+                **factory_kwargs
+            )
+            self.contrastive_ar_head = nn.Linear(self.d_model, self.d_model, bias=False, **factory_kwargs)
 
         if not self.is_innermost:
             self.routing_module = RoutingModule(
@@ -267,6 +279,9 @@ class HNet(nn.Module):
         hidden_states, next_cu_seqlens, next_max_seqlen, next_mask = self.chunk_layer(
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
         )
+
+        # if self.contrastive_loss:
+            
 
         hidden_states, prev_boundary_predictions = self.main_network(
             hidden_states,

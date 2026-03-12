@@ -20,7 +20,8 @@ dependencies = [
     "regex",
     "omegaconf",
     "datasets",
-    "lm-eval"
+    "lm-eval",
+    "matplotlib"
 ]
 [project.urls]
 Repository = "https://github.com/goombalab/hnet"

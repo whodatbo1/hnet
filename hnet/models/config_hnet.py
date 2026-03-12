@@ -25,6 +25,12 @@ class RoutingConfig:
     num_heads: int = 4
     window_size: int = 8
     d_similarity: int = -1
+    random: bool = False
+    compression_ratio: float = 1.0
+    softmax_gating: bool = False
+    coding_rate: bool = False
+    coding_rate_epsilon: float = 1.0
+    identity_routing: bool = False
 
 @dataclass
 class HNetConfig:
@@ -37,3 +43,6 @@ class HNetConfig:
     attn_cfg: AttnConfig = field(default_factory=AttnConfig)
     tie_embeddings: bool = False
     routing_cfg: RoutingConfig = field(default_factory=RoutingConfig)
+    contrastive_loss: bool = False
+    contrastive_loss_arch: str = "T2"
+    contrastive_num_neg_samples: int = 8

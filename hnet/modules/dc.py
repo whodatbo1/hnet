@@ -1,3 +1,6 @@
+import re
+import copy
+
 from dataclasses import dataclass
 
 import torch
@@ -6,9 +9,12 @@ import torch.nn.functional as F
 
 from einops import repeat, rearrange
 
+from flash_attn.ops.triton.layer_norm import RMSNorm
+
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 from hnet.modules.utils import get_seq_idx
+from hnet.modules.block import create_block
 
 from hnet.models.config_hnet import RoutingConfig
 
@@ -51,8 +57,17 @@ class RoutingModule(nn.Module):
     def __init__(self, d_model, routing_cfg: RoutingConfig, device=None, dtype=None):
 
         self.d_model = d_model
+        self.random = routing_cfg.random
+        self.compression_ratio = routing_cfg.compression_ratio
+
+        self.coding_rate = routing_cfg.coding_rate
+        self.coding_rate_epsilon = routing_cfg.coding_rate_epsilon
+
+        self.identity_routing = routing_cfg.identity_routing
+
         self.multiheaded = routing_cfg.multiheaded
         self.d_similarity = routing_cfg.d_similarity if routing_cfg.d_similarity > 0 else d_model
+        self.softmax_gating = routing_cfg.softmax_gating
         
         if self.multiheaded:
             assert self.d_similarity % routing_cfg.num_heads == 0, "d_similarity should be divisible by num_heads"
@@ -67,8 +82,13 @@ class RoutingModule(nn.Module):
         self.q_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
         self.k_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
 
+        if self.coding_rate:
+            self.cr_proj = nn.Linear(self.d_model, self.d_similarity, bias=False)
+
         if self.multiheaded:
-            self.head_gate = nn.Linear(d_model * self.window_size, self.num_heads, bias=False, **factory_kwargs)
+            self.head_gate_conv = nn.Conv1d(self.d_model, self.num_heads, kernel_size=self.window_size, bias=False, **factory_kwargs)
+            with torch.no_grad():
+                nn.init.zeros_(self.head_gate_conv.weight)
         
         with torch.no_grad():
             nn.init.zeros_(self.q_proj_layer.weight)
@@ -104,7 +124,40 @@ class RoutingModule(nn.Module):
             # We are in packed mode, so hidden_states is (T, D). Make it (B, T, D)
             hidden_states = hidden_states.unsqueeze(0)
 
-        if self.multiheaded:    
+        if self.identity_routing:
+            cos_sim = torch.einsum(
+                "b l d, b l d -> b l",
+                F.normalize(hidden_states[:, :-1], dim=-1),
+                F.normalize(hidden_states[:, 1:], dim=-1),
+            )
+        if self.random:
+            B, T, D = hidden_states.shape
+            num_boundaries = int((T - 1) / self.compression_ratio)
+
+            weights = torch.ones(B, T - 1, device=hidden_states.device)
+            boundary_indices = torch.multinomial(weights, num_samples=num_boundaries, replacement=False)
+            cos_sim = torch.ones(B, T - 1, device=hidden_states.device)
+            cos_sim.scatter_(1, boundary_indices, -1.0)
+        elif self.coding_rate:
+            B, T, D = hidden_states.shape
+
+            I = torch.eye(self.d_similarity, device=hidden_states.device)
+
+            hs_proj = self.cr_proj(hidden_states)
+
+            outers = torch.einsum('bti,btj -> btij', hs_proj, hs_proj)
+            S_cum = torch.cumsum(outers, dim=1)
+            
+            crs = I + ((self.d_similarity / self.coding_rate_epsilon ** 2) * S_cum)
+
+            _, logdet = torch.linalg.slogdet(crs)
+
+            R = 0.5 * logdet
+
+            delta_R = R[:, 1:] - R[:, :-1]
+            
+            cos_sim = delta_R
+        elif self.multiheaded:
             B, T, D = hidden_states.shape
 
             q = self.q_proj_layer(hidden_states[:, :-1])
@@ -118,9 +171,14 @@ class RoutingModule(nn.Module):
 
             cos_sim = torch.einsum("b l h d, b l h d -> b l h", q, k)
 
-            h_padded = F.pad(hidden_states, (0, 0, self.window_size - 1, 0))
-            windows = h_padded.unfold(1, self.window_size, 1).reshape(B, T, D * self.window_size)
-            gates = torch.sigmoid(self.head_gate(windows)) # (B, T, H)
+            h_padded = F.pad(hidden_states.transpose(1, 2), (self.window_size - 1, 0))
+            gates = self.head_gate_conv(h_padded)
+            if self.softmax_gating:
+                gates = torch.softmax(gates, dim=1).transpose(1, 2) # (B, T, H)
+                # Normalize so that final cos_sim is in [-1, 1] range
+                gates = gates / (gates.sum(dim=-1, keepdim=True) + 1e-8)
+            else:
+                gates = torch.sigmoid(gates).transpose(1, 2) # (B, T, H)
             cos_sim = (cos_sim * gates[:, 1:]).sum(dim=-1)
         else:
             cos_sim = torch.einsum(

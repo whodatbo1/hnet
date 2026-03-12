@@ -14,7 +14,7 @@ from flash_attn.ops.triton.layer_norm import RMSNorm
 from hnet.modules.block import create_block
 from hnet.modules.utils import get_seq_idx, get_stage_cfg
 
-from hnet.models.config_hnet import HNetConfig
+from hnet.models.config_hnet import HNetConfig, SSMConfig, AttnConfig
 
 
 @dataclass
@@ -58,12 +58,43 @@ class Isotropic(nn.Module):
         self.d_model = config.d_model[self.stage_idx]
         self.ssm_cfg = get_stage_cfg(config.ssm_cfg, stage_idx)
         self.attn_cfg = get_stage_cfg(config.attn_cfg, stage_idx)
+        self.d_intermediate = config.d_intermediate[self.stage_idx]
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
             arch_layout = arch_layout[1]
-        arch_layout = arch_layout[pos_idx]
-        layout_parse = re.findall(r"([mMtT])(\d+)", arch_layout)
+        self.arch_layout = arch_layout[pos_idx]
+
+        self._init_layers(factory_kwargs)
+
+    # Init for when we want to use an Isotropic model outside the hierarchical setup
+    @classmethod
+    def standalone(
+        cls,
+        d_model: int,
+        d_intermediate: int,
+        ssm_cfg: SSMConfig,
+        attn_cfg: AttnConfig,
+        arch_layout,
+        device=None,
+        dtype=None,
+    ):
+        obj = cls.__new__(cls)  # create instance without calling __init__
+        nn.Module.__init__(obj)  # but still init the nn.Module base
+
+        factory_kwargs = {"device": device, "dtype": dtype}
+
+        obj.d_model = d_model
+        obj.ssm_cfg = ssm_cfg
+        obj.attn_cfg = attn_cfg
+        obj.arch_layout = arch_layout
+        obj.d_intermediate = d_intermediate
+
+        obj._init_layers(factory_kwargs)
+        return obj
+
+    def _init_layers(self, factory_kwargs):
+        layout_parse = re.findall(r"([mMtT])(\d+)", self.arch_layout)
 
         layers = []
         layer_idx = 0
@@ -78,7 +109,7 @@ class Isotropic(nn.Module):
                 create_block(
                     arch,
                     self.d_model,
-                    d_intermediate=config.d_intermediate[self.stage_idx],
+                    d_intermediate=self.d_intermediate,
                     ssm_cfg=self.ssm_cfg,
                     attn_cfg=self.attn_cfg,
                     layer_idx=(layer_idx + i),

@@ -39,6 +39,12 @@ def load_balancing_loss(
         (true_ratio) * (average_prob) * (N-1)
     ) * N / (N-1)
 
+# Keeping the effective rank of BP matrices high
+def orthogonality_regularization_soft(W):
+    """Penalizes singular values drifting from 1."""
+    WTW = W.T @ W
+    I = torch.eye(W.shape[1], device=W.device, dtype=W.dtype)
+    return torch.norm(WTW - I, p='fro') ** 2
 
 def group_params(
     model: HNetForCausalLM,

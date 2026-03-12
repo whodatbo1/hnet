@@ -34,14 +34,12 @@ from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetConfig
 from hnet.modules.block import Block
 from hnet.utils.data import create_dataloaders
-from hnet.utils.train import load_balancing_loss, group_params
+from hnet.utils.train import load_balancing_loss, group_params, orthogonality_regularization_soft
 from hnet.utils.eval import bits_per_byte, compression_metrics
+from hnet.modules.dc import RoutingModule
 
 
-# ---------------------------------------------------------------------------
 # Learning rate schedule: Warmup-Stable-Decay (WSD)
-# ---------------------------------------------------------------------------
-
 def wsd_schedule(step, max_steps, warmup_fraction, decay_fraction, base_lr):
     """WSD learning rate schedule with linear warmup, stable phase, and 1/sqrt decay."""
     warmup_steps = int(max_steps * warmup_fraction)
@@ -60,6 +58,12 @@ def wsd_schedule(step, max_steps, warmup_fraction, decay_fraction, base_lr):
         return base_lr / math.sqrt(1.0 + decay_progress * 9.0)
         # At the end (decay_progress=1), LR = base_lr / sqrt(10) ~ 0.316 * base_lr
 
+# Precompute LR per step
+def build_lr_schedule(cfg):
+    return {
+        step: wsd_schedule(step, cfg.max_steps, cfg.warmup_fraction, cfg.decay_fraction, 1.0)
+        for step in range(cfg.max_steps)
+    }
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -82,7 +86,7 @@ def print_rank0(msg, rank=None):
         print(msg, flush=True)
 
 
-def save_checkpoint(model, optimizer, step, cfg, checkpoint_dir):
+def save_checkpoint(model, optimizer, step, cfg, checkpoint_dir, elapsed_time_since_training_start):
     """Save model and training state checkpoint."""
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank != 0:
@@ -102,7 +106,8 @@ def save_checkpoint(model, optimizer, step, cfg, checkpoint_dir):
     torch.save(model_state, os.path.join(checkpoint_dir, f"model_step{step}.pt"))
     torch.save(
         {"step": step, "optimizer": optimizer.state_dict(),
-         "config": OmegaConf.to_container(cfg)},
+         "config": OmegaConf.to_container(cfg),
+         "time_since_start": int(elapsed_time_since_training_start)},
         os.path.join(checkpoint_dir, f"train_state_step{step}.pt"),
     )
     # Save a "latest" pointer
@@ -114,7 +119,7 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
     """Load model and training state from checkpoint. Returns the step to resume from."""
     latest_path = os.path.join(checkpoint_dir, "latest.pt")
     if not os.path.exists(latest_path):
-        return 0
+        return 0, 0
 
     latest = torch.load(latest_path, map_location="cpu")
     step = latest["step"]
@@ -132,12 +137,14 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
         state_dict = torch.load(model_path, map_location=device)
         model.load_state_dict(state_dict)
 
+    time_since_start = 0
     if os.path.exists(train_state_path):
         train_state = torch.load(train_state_path, map_location="cpu")
         optimizer.load_state_dict(train_state["optimizer"])
+        time_since_start = train_state["time_since_start"]
 
     print_rank0(f"Resumed from checkpoint at step {step}")
-    return step
+    return step, time_since_start
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +232,16 @@ def validate(model, val_dataloader, cfg, step, device):
 
     total_ce_loss = torch.tensor(0.0, device=device)
     total_lb_loss = torch.tensor(0.0, device=device)
+    total_ortho_loss = torch.tensor(0.0, device=device)
     total_bytes = 0
     num_batches = 0
     all_compression_metrics = {}
 
     val_batches = cfg.get("val_batches", 50)
+
+    ortho_reg_lambda = cfg.get("ortho_reg_lambda", 0.0)
+    if not ortho_reg_lambda:
+        ortho_reg_lambda = 0.0
 
     for batch_idx, batch in enumerate(val_dataloader):
         if batch_idx >= val_batches:
@@ -249,11 +261,13 @@ def validate(model, val_dataloader, cfg, step, device):
                 targets.reshape(-1),
                 reduction="sum",
             )
-            # Also track mean for logging convenience
-            ce_loss_mean = nn.functional.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
-            )
+            
+            ortho_loss = 0.0
+            if ortho_reg_lambda > 0:
+                for module in model.modules():
+                    if isinstance(module, RoutingModule):
+                        ortho_loss += orthogonality_regularization_soft(module.q_proj_layer.weight)
+                        ortho_loss += orthogonality_regularization_soft(module.k_proj_layer.weight)
 
             lb_loss = torch.tensor(0.0, device=device)
             if output.bpred_output:
@@ -269,7 +283,8 @@ def validate(model, val_dataloader, cfg, step, device):
                     all_compression_metrics.setdefault(k, []).append(v)
 
         total_ce_loss += ce_loss_sum
-        total_lb_loss += ce_loss_mean
+        total_lb_loss += lb_loss
+        total_ortho_loss += ortho_loss
         total_bytes += targets.numel()
         num_batches += 1
 
@@ -279,23 +294,26 @@ def validate(model, val_dataloader, cfg, step, device):
 
     # Aggregate across ranks
     if distributed:
-        stats = torch.tensor([total_ce_loss, total_lb_loss, float(total_bytes), float(num_batches)], device=device)
+        stats = torch.tensor([total_ce_loss, total_lb_loss, total_ortho_loss, float(total_bytes), float(num_batches)], device=device)
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
         total_ce_loss = stats[0]
         total_lb_loss_sum = stats[1]
-        total_bytes = int(stats[2].item())
-        num_batches = int(stats[3].item())
+        total_ortho_loss = stats[2]
+        total_bytes = int(stats[3].item())
+        num_batches = int(stats[4].item())
     else:
         total_lb_loss_sum = total_lb_loss
 
     bpb = bits_per_byte(total_ce_loss, total_bytes)
     avg_loss = (total_ce_loss / total_bytes).item()
     avg_lb = (total_lb_loss_sum / num_batches).item()
+    avg_ortho = (total_ortho_loss / num_batches).item()
 
     metrics = {
         "val/loss": avg_loss,
         "val/bpb": bpb,
         "val/lb_loss": avg_lb,
+        "val/ortho_loss": avg_ortho,
         "step": step,
     }
 
@@ -304,7 +322,7 @@ def validate(model, val_dataloader, cfg, step, device):
         metrics[f"val/{k}"] = sum(vals) / len(vals)
 
     print_rank0(
-        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f}",
+        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f}",
         rank,
     )
 
@@ -333,6 +351,20 @@ def main():
     world_size = dist.get_world_size() if distributed else 1
 
     torch.manual_seed(cfg.seed + rank)
+
+    # ---- Validate cfg ----
+    tokens_per_step = cfg.batch_size * cfg.grad_accum_steps * world_size * cfg.seq_len
+
+    if cfg.get("total_tokens"):
+        max_steps = cfg.total_tokens // tokens_per_step
+        cfg.max_steps = max_steps
+    elif cfg.get("max_steps"):
+        max_steps = cfg.max_steps
+    else:
+        raise ValueError("Specify either total_tokens or max_steps")
+
+    total_tokens_actual = max_steps * tokens_per_step
+    print_rank0(f"Training for {max_steps} steps = {total_tokens_actual:,} tokens")
 
     # ---- Load model config & create model ----
     with open(cfg.model_config, "r") as f:
@@ -421,11 +453,20 @@ def main():
             check_fn=lambda module: isinstance(module, Block),
         )
         print_rank0("Activation checkpointing enabled on Block modules", rank)
+    
+    # Compile the model
+    if cfg.get("compile", False):
+        model = torch.compile(model)
+        print_rank0("torch.compile enabled", rank)
 
     # ---- Optimizer ----
     # use_orig_params=True in FSDP allows per-parameter LR/WD from group_params
     betas = tuple(cfg.betas) if cfg.get("betas") else (0.9, 0.95)
     optimizer = torch.optim.AdamW(param_groups, betas=betas)
+
+    # ---- LR Schedule ----
+    lr_per_step = build_lr_schedule(cfg)
+    base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
     # ---- Data ----
     dataloader, val_dataloader = create_dataloaders(
@@ -440,8 +481,9 @@ def main():
 
     # ---- Resume ----
     start_step = 0
+    time_since_start = 0
     if cfg.resume:
-        start_step = load_checkpoint(model, optimizer, cfg.checkpoint_dir, device)
+        start_step, time_since_start = load_checkpoint(model, optimizer, cfg.checkpoint_dir, device)
 
     # ---- Wandb ----
     wandb_project = cfg.get("wandb_project", None)
@@ -462,7 +504,7 @@ def main():
     # ---- Training loop ----
     effective_batch = cfg.batch_size * cfg.grad_accum_steps * world_size
     print_rank0(
-        f"Training: {cfg.max_steps} steps, "
+        f"Training: {max_steps} steps, "
         f"micro_batch={cfg.batch_size}, grad_accum={cfg.grad_accum_steps}, "
         f"world_size={world_size}, effective_batch={effective_batch}, "
         f"seq_len={cfg.seq_len}",
@@ -475,30 +517,39 @@ def main():
     step = start_step
     accum_loss = 0.0
     accum_lb_loss = 0.0
+    accum_ortho_loss = 0.0
     accum_tokens = 0
     total_tokens = 0
-    t_start = time.time()
-    print(f"Starting training at {t_start}")
-    data_iter = iter(dataloader)
+    epoch = 0
 
-    while step < cfg.max_steps:
-        print(f"Starting step: {step}")
-        # Update LR
-        lr_scale = wsd_schedule(
-            step, cfg.max_steps, cfg.warmup_fraction, cfg.decay_fraction, 1.0
-        )
-        print(f"Setting lr_scale: {lr_scale}")
-        for pg in optimizer.param_groups:
-            base_lr = pg.get("_base_lr", None)
-            if base_lr is None:
-                pg["_base_lr"] = pg["lr"]
-                base_lr = pg["lr"]
+    # Timing
+    train_start = time.time()
+    elapsed_time_since_last_log = 0
+    elapsed_time_since_training_start = time_since_start
+    print_rank0(f"Starting training at {train_start}")
+
+    data_iter = iter(dataloader)
+    ortho_reg_lambda = cfg.get("ortho_reg_lambda", 0)
+    if not ortho_reg_lambda:
+        ortho_reg_lambda = 0
+
+    while step < max_steps:
+        step_start_time = time.time()
+        if step % cfg.log_every == 0:
+            print_rank0(f"Starting step: {step}")
+
+        lr_scale = lr_per_step[step]
+        if step % cfg.log_every == 0:
+            print_rank0(f"Setting lr_scale: {lr_scale}")
+        for base_lr, pg in zip(base_lrs, optimizer.param_groups):
             pg["lr"] = base_lr * lr_scale
 
         for micro_step in range(cfg.grad_accum_steps):
             try:
                 batch = next(data_iter)
             except StopIteration:
+                epoch += 1
+                print_rank0(f"Epoch {epoch} started at step {step}", rank)
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
 
@@ -509,7 +560,6 @@ def main():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 # mask=None triggers packed mode in the model
                 output = model(input_ids, mask=None)
-                # print(f"Received model output: {output}")
 
                 # AR cross-entropy loss
                 logits = output.logits  # (B, seq_len, vocab_size)
@@ -518,25 +568,33 @@ def main():
                     targets.reshape(-1),
                     ignore_index=-100,
                 )
+                            
+                ortho_loss = 0.0
+            
+                if ortho_reg_lambda > 0:
+                    for module in model.modules():
+                        if isinstance(module, RoutingModule):
+                            ortho_loss += orthogonality_regularization_soft(module.q_proj_layer.weight)
+                            ortho_loss += orthogonality_regularization_soft(module.k_proj_layer.weight)
 
                 # Load balancing loss across routing stages
                 lb_loss = torch.tensor(0.0, device=device)
-                # print(f"output.bpred_output: {output.bpred_output}")
+
                 if output.bpred_output:
                     for router_out in output.bpred_output:
-                        # print(f"router_out: {router_out}")
                         lb_loss = lb_loss + load_balancing_loss(
                             router_out, N=cfg.downsample_n
                         )
                     lb_loss = lb_loss / len(output.bpred_output)
 
-                loss = ce_loss + cfg.alpha * lb_loss
+                loss = ce_loss + cfg.alpha * lb_loss + ortho_reg_lambda * ortho_loss
                 loss = loss / cfg.grad_accum_steps
 
             loss.backward()
 
             accum_loss += ce_loss.detach().item()
             accum_lb_loss += lb_loss.detach().item()
+            accum_ortho_loss += ortho_loss.detach().item() if isinstance(ortho_loss, torch.Tensor) else ortho_loss
             accum_tokens += targets.numel()
 
         # Gradient clipping
@@ -554,25 +612,31 @@ def main():
         optimizer.zero_grad()
         step += 1
 
+        step_end_time = time.time()
+        step_time = step_end_time - step_start_time
+        elapsed_time_since_last_log += step_time
+        elapsed_time_since_training_start += step_time
+
         # Logging
         if step % cfg.log_every == 0:
             avg_loss = accum_loss / (cfg.grad_accum_steps * cfg.log_every)
             avg_lb = accum_lb_loss / (cfg.grad_accum_steps * cfg.log_every)
-            elapsed = time.time() - t_start
-            tokens_per_sec = accum_tokens / elapsed if elapsed > 0 else 0
+            avg_ortho = accum_ortho_loss / (cfg.grad_accum_steps * cfg.log_every)
+            
+            tokens_per_sec = accum_tokens / elapsed_time_since_last_log
             total_tokens += accum_tokens
             current_lr = optimizer.param_groups[0]["lr"]
 
             if distributed:
                 # Average loss across ranks
-                loss_tensor = torch.tensor([avg_loss, avg_lb], device=device)
+                loss_tensor = torch.tensor([avg_loss, avg_lb, avg_ortho], device=device)
                 dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-                avg_loss, avg_lb = loss_tensor[0].item(), loss_tensor[1].item()
+                avg_loss, avg_lb, avg_ortho = loss_tensor[0].item(), loss_tensor[1].item(), loss_tensor[2].item()
 
             print_rank0(
-                f"step={step:>6d} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | "
+                f"step={step:>6d} | epoch={epoch} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f} | "
                 f"grad_norm={grad_norm:.3f} | lr={current_lr:.2e} | "
-                f"tok/s={tokens_per_sec:.0f}",
+                f"tok/s={tokens_per_sec:.0f} | time_since_start={elapsed_time_since_training_start}",
                 rank,
             )
 
@@ -581,17 +645,21 @@ def main():
                 wandb.log({
                     "loss": avg_loss,
                     "lb_loss": avg_lb,
+                    "ortho_loss": avg_ortho,
                     "grad_norm": grad_norm,
                     "lr": current_lr,
                     "tokens_per_sec": tokens_per_sec,
                     "step": step,
-                    "total_tokens": total_tokens
-                })
+                    "epoch": epoch,
+                    "total_tokens": total_tokens,
+                    "time_since_start": elapsed_time_since_training_start,
+                }, step=step)
 
             accum_loss = 0.0
             accum_lb_loss = 0.0
+            accum_ortho_loss = 0.0
             accum_tokens = 0
-            t_start = time.time()
+            elapsed_time_since_last_log = 0
 
         if cfg.get("validate_every", 0) > 0 and step % cfg.validate_every == 0:
             val_metrics = validate(model, val_dataloader, cfg, step, device)
@@ -600,13 +668,17 @@ def main():
                 wandb.log(val_metrics)
         # Checkpointing
         if step % cfg.save_every == 0:
-            save_checkpoint(model, optimizer, step, cfg, cfg.checkpoint_dir)
+            save_checkpoint(model, optimizer, step, cfg, cfg.checkpoint_dir, elapsed_time_since_training_start)
 
         if distributed:
             dist.barrier()
+        
+        post_step_time = time.time() - step_end_time
+        elapsed_time_since_last_log += post_step_time
+        elapsed_time_since_training_start += post_step_time
 
     # Final checkpoint
-    save_checkpoint(model, optimizer, step, cfg, cfg.checkpoint_dir)
+    save_checkpoint(model, optimizer, step, cfg, cfg.checkpoint_dir, elapsed_time_since_training_start)
     print_rank0("Training complete.", rank)
 
     if distributed:
