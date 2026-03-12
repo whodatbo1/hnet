@@ -15,12 +15,12 @@ betas: [0.9, 0.95]
 max_grad_norm: 1.0
 
 # --- LR Schedule (Warmup-Stable-Decay) ---
-warmup_fraction: 0.1   # 10% linear warmup
+warmup_fraction: 0.1    # 10% linear warmup
 decay_fraction: 0.2     # 20% inverse-sqrt decay
 
 # --- Loss ---
 alpha: 0.03             # Load balancing loss weight
-downsample_n: 6       # Expected downsampling factor N
+downsample_n: 6         # Expected downsampling factor N
 
 # --- Data ---
 data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with download_data.py)
@@ -29,17 +29,17 @@ seq_len: 8192
 seed: 42
 
 # --- Batch ---
-batch_size: 4            # Micro batch size per GPU
-grad_accum_steps: 8      # Gradient accumulation steps
+batch_size: 8            # Micro batch size per GPU
+grad_accum_steps: 32      # Gradient accumulation steps
 num_workers: 8           # Dataloader workers (can use >0 with local data)
 
 # --- Training ---
-max_steps: 10000
+max_steps: 5000
 
 # --- Validation ---
 validate_every: 100       # Run validation every N steps (0 to disable)
 val_fraction: 0.005       # Fraction of streaming documents reserved for validation (0.5%)
-val_batches: 50           # Number of micro-batches per validation run
+val_batches: 128           # Number of micro-batches per validation run
 
 # --- Checkpointing ---
 checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/train_hnet_1stage_L_700M_baseline

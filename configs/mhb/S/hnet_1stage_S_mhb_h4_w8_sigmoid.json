@@ -16,8 +16,9 @@
     },
     "tie_embeddings": false,
     "routing_cfg": {
-        "multiheaded": false,
+        "multiheaded": true,
         "num_heads": 4,
-        "window_size": 8
+        "window_size": 8,
+        "softmax_gating": false
     }
 }

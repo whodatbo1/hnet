@@ -18,6 +18,9 @@
     "routing_cfg": {
         "multiheaded": false,
         "num_heads": 4,
-        "window_size": 8
+        "window_size": 8,
+        "d_similarity": 2048,
+        "random": true,
+        "compression_ratio": 6
     }
 }

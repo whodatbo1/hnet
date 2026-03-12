@@ -2,7 +2,7 @@
 # Override any field via CLI: python train.py --config configs/train/default.yaml --lr 1e-3
 
 # --- Model ---
-model_config: configs/hnet_1stage_L_multiheaded_boundaries.json
+model_config: configs/mhb/hnet_1stage_L_multiheaded_boundaries_h4_ws8.json
 
 # Per-stage LR multipliers (outer to inner). Set to null to disable.
 # Example for 2-stage: [3.0, 1.7, 0.9]
@@ -29,27 +29,31 @@ seq_len: 8192
 seed: 42
 
 # --- Batch ---
-batch_size: 8            # Micro batch size per GPU
-grad_accum_steps: 8      # Gradient accumulation steps
-num_workers: 8           # Dataloader workers (can use >0 with local data)
+batch_size: 4            # Micro batch size per GPU
+grad_accum_steps: 64      # Gradient accumulation steps
+num_workers: 2           # Dataloader workers (can use >0 with local data)
 
 # --- Training ---
-max_steps: 10000
+max_steps: null
+total_tokens: 45_000_000_000
 
 # --- Validation ---
 validate_every: 100       # Run validation every N steps (0 to disable)
 val_fraction: 0.005       # Fraction of streaming documents reserved for validation (0.5%)
-val_batches: 50           # Number of micro-batches per validation run
+val_batches: 128          # Number of micro-batches per validation run
 
 # --- Checkpointing ---
-checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/train_hnet_1stage_L_700M_multiheaded_boundaries
-save_every: 500
+checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/mhb/hnet_1stage_L_multiheaded_boundaries_h4_ws8
+save_every: 250
 resume: true
 
 # --- Logging ---
 log_every: 10
 wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
-wandb_run_name: "train_hnet_1stage_L_700M_multihead_boundaries"
+wandb_run_name: "hnet_1stage_L_multiheaded_boundaries_h4_ws8"
 
 # --- Memory ---
 activation_checkpointing: false
+
+# --- Compile ---
+compile: false
