@@ -58,6 +58,36 @@ def wsd_schedule(step, max_steps, warmup_fraction, decay_fraction, base_lr):
         return base_lr / math.sqrt(1.0 + decay_progress * 9.0)
         # At the end (decay_progress=1), LR = base_lr / sqrt(10) ~ 0.316 * base_lr
 
+def log_gradient_norms(model, distributed=False, device=None, prefix="grad_norm"):
+    """Compute per-module gradient L2 norms, grouped by the first two name segments.
+
+    With FSDP (distributed=True), squared norms are all-reduced across ranks before
+    taking the sqrt so that logged values reflect the full gradient, not a shard.
+    Should be called after loss.backward() and before optimizer.step().
+    """
+    module_sq_norms = {}
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+        key = ".".join(name.split(".")[:3])
+        sq = param.grad.detach().float().norm() ** 2
+        module_sq_norms[key] = module_sq_norms.get(key, 0.0) + sq
+
+    if distributed and device is not None:
+        keys = sorted(module_sq_norms.keys())
+        tensor = torch.tensor(
+            [module_sq_norms[k].item() if isinstance(module_sq_norms[k], torch.Tensor) else module_sq_norms[k] for k in keys],
+            device=device,
+        )
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        module_sq_norms = {k: tensor[i] for i, k in enumerate(keys)}
+
+    return {
+        f"{prefix}/{k}": (v.sqrt().item() if isinstance(v, torch.Tensor) else v ** 0.5)
+        for k, v in module_sq_norms.items()
+    }
+
+
 # Precompute LR per step
 def build_lr_schedule(cfg):
     return {
@@ -518,6 +548,7 @@ def main():
     accum_loss = 0.0
     accum_lb_loss = 0.0
     accum_ortho_loss = 0.0
+    accum_bm_loss = 0.0
     accum_tokens = 0
     total_tokens = 0
     epoch = 0
@@ -579,15 +610,23 @@ def main():
 
                 # Load balancing loss across routing stages
                 lb_loss = torch.tensor(0.0, device=device)
+                bm_loss = torch.tensor(0.0, device=device)
 
                 if output.bpred_output:
                     for router_out in output.bpred_output:
                         lb_loss = lb_loss + load_balancing_loss(
                             router_out, N=cfg.downsample_n
                         )
+                        if router_out.bm_logits is not None:
+                            bm_loss = bm_loss + nn.functional.cross_entropy(
+                                router_out.bm_logits.reshape(-1, router_out.bm_logits.size(-1)),
+                                targets.reshape(-1),
+                            )
                     lb_loss = lb_loss / len(output.bpred_output)
+                    bm_loss = bm_loss / len(output.bpred_output)
 
-                loss = ce_loss + cfg.alpha * lb_loss + ortho_reg_lambda * ortho_loss
+                bm_loss_weight = cfg.get("bm_loss_weight", 1.0)
+                loss = ce_loss + cfg.alpha * lb_loss + ortho_reg_lambda * ortho_loss + bm_loss_weight * bm_loss
                 loss = loss / cfg.grad_accum_steps
 
             loss.backward()
@@ -595,7 +634,13 @@ def main():
             accum_loss += ce_loss.detach().item()
             accum_lb_loss += lb_loss.detach().item()
             accum_ortho_loss += ortho_loss.detach().item() if isinstance(ortho_loss, torch.Tensor) else ortho_loss
+            accum_bm_loss += bm_loss.detach().item()
             accum_tokens += targets.numel()
+
+        # Per-module gradient norms (pre-clip, only on log steps to limit overhead)
+        grad_norm_metrics = {}
+        if (step + 1) % cfg.log_every == 0:
+            grad_norm_metrics = log_gradient_norms(model, distributed=distributed, device=device)
 
         # Gradient clipping
         if cfg.max_grad_norm > 0:
@@ -622,6 +667,7 @@ def main():
             avg_loss = accum_loss / (cfg.grad_accum_steps * cfg.log_every)
             avg_lb = accum_lb_loss / (cfg.grad_accum_steps * cfg.log_every)
             avg_ortho = accum_ortho_loss / (cfg.grad_accum_steps * cfg.log_every)
+            avg_bm = accum_bm_loss / (cfg.grad_accum_steps * cfg.log_every)
             
             tokens_per_sec = accum_tokens / elapsed_time_since_last_log
             total_tokens += accum_tokens
@@ -629,12 +675,12 @@ def main():
 
             if distributed:
                 # Average loss across ranks
-                loss_tensor = torch.tensor([avg_loss, avg_lb, avg_ortho], device=device)
+                loss_tensor = torch.tensor([avg_loss, avg_lb, avg_ortho, avg_bm], device=device)
                 dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-                avg_loss, avg_lb, avg_ortho = loss_tensor[0].item(), loss_tensor[1].item(), loss_tensor[2].item()
+                avg_loss, avg_lb, avg_ortho, avg_bm = loss_tensor[0].item(), loss_tensor[1].item(), loss_tensor[2].item(), loss_tensor[3].item()
 
             print_rank0(
-                f"step={step:>6d} | epoch={epoch} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f} | "
+                f"step={step:>6d} | epoch={epoch} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm:.4f} | "
                 f"grad_norm={grad_norm:.3f} | lr={current_lr:.2e} | "
                 f"tok/s={tokens_per_sec:.0f} | time_since_start={elapsed_time_since_training_start}",
                 rank,
@@ -646,6 +692,7 @@ def main():
                     "loss": avg_loss,
                     "lb_loss": avg_lb,
                     "ortho_loss": avg_ortho,
+                    "bm_loss": avg_bm,
                     "grad_norm": grad_norm,
                     "lr": current_lr,
                     "tokens_per_sec": tokens_per_sec,
@@ -653,11 +700,13 @@ def main():
                     "epoch": epoch,
                     "total_tokens": total_tokens,
                     "time_since_start": elapsed_time_since_training_start,
+                    **grad_norm_metrics,
                 }, step=step)
 
             accum_loss = 0.0
             accum_lb_loss = 0.0
             accum_ortho_loss = 0.0
+            accum_bm_loss = 0.0
             accum_tokens = 0
             elapsed_time_since_last_log = 0
 

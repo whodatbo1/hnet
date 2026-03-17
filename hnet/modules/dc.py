@@ -1,7 +1,9 @@
 import re
 import copy
+import math
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -24,6 +26,7 @@ class RoutingModuleOutput:
     boundary_prob: torch.Tensor
     boundary_mask: torch.Tensor
     selected_probs: torch.Tensor
+    bm_logits: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -65,6 +68,9 @@ class RoutingModule(nn.Module):
 
         self.identity_routing = routing_cfg.identity_routing
 
+        self.entropy_routing = routing_cfg.entropy_routing
+        self.byte_vocab_size = routing_cfg.byte_vocab_size
+
         self.multiheaded = routing_cfg.multiheaded
         self.d_similarity = routing_cfg.d_similarity if routing_cfg.d_similarity > 0 else d_model
         self.softmax_gating = routing_cfg.softmax_gating
@@ -83,7 +89,11 @@ class RoutingModule(nn.Module):
         self.k_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
 
         if self.coding_rate:
-            self.cr_proj = nn.Linear(self.d_model, self.d_similarity, bias=False)
+            self.cr_proj = nn.Linear(self.d_model, self.d_similarity, bias=False, **factory_kwargs)
+
+        # Byte-modelling Head
+        if self.entropy_routing:
+            self.bm_head = nn.Linear(self.d_model, self.byte_vocab_size, bias=False, **factory_kwargs)
 
         if self.multiheaded:
             self.head_gate_conv = nn.Conv1d(self.d_model, self.num_heads, kernel_size=self.window_size, bias=False, **factory_kwargs)
@@ -123,6 +133,8 @@ class RoutingModule(nn.Module):
         if cu_seqlens is not None:
             # We are in packed mode, so hidden_states is (T, D). Make it (B, T, D)
             hidden_states = hidden_states.unsqueeze(0)
+
+        bm_logits = None
 
         if self.identity_routing:
             cos_sim = torch.einsum(
@@ -180,6 +192,15 @@ class RoutingModule(nn.Module):
             else:
                 gates = torch.sigmoid(gates).transpose(1, 2) # (B, T, H)
             cos_sim = (cos_sim * gates[:, 1:]).sum(dim=-1)
+        elif self.entropy_routing:
+            B, T, D = hidden_states.shape
+            bm_logits = self.bm_head(hidden_states)  # (B, T, vocab_size)
+            log_probs = bm_logits.log_softmax(-1)
+            # entropy in bits [0, log2(vocab_size)]
+            entropies = -(log_probs.exp() * log_probs).sum(-1) / math.log(2)  # (B, T)
+            # Map to cos_sim-like signal in [-1, 1]: high entropy → boundary (cos_sim → -1)
+            max_entropy = math.log2(self.byte_vocab_size)
+            cos_sim = 1.0 - 2.0 * (entropies[:, :-1] / max_entropy)  # (B, T-1)
         else:
             cos_sim = torch.einsum(
                 "b l d, b l d -> b l",
@@ -234,6 +255,7 @@ class RoutingModule(nn.Module):
             boundary_prob=boundary_prob,  # (shape hidden_states.shape[:-1], 2)
             boundary_mask=boundary_mask,  # (shape hidden_states.shape[:-1])
             selected_probs=selected_probs,  # (shape hidden_states.shape[:-1], 1)
+            bm_logits=bm_logits,  # (B, T, vocab_size) or None
         )
 
     def step(self, hidden_states, inference_params):

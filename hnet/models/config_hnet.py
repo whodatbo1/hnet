@@ -31,6 +31,8 @@ class RoutingConfig:
     coding_rate: bool = False
     coding_rate_epsilon: float = 1.0
     identity_routing: bool = False
+    entropy_routing: bool = False
+    byte_vocab_size: int = 256
 
 @dataclass
 class HNetConfig:
