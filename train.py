@@ -20,6 +20,7 @@ import json
 import math
 import os
 import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +38,6 @@ from hnet.utils.data import create_dataloaders
 from hnet.utils.train import load_balancing_loss, group_params, orthogonality_regularization_soft
 from hnet.utils.eval import bits_per_byte, compression_metrics
 from hnet.modules.dc import RoutingModule
-
 
 # Learning rate schedule: Warmup-Stable-Decay (WSD)
 def wsd_schedule(step, max_steps, warmup_fraction, decay_fraction, base_lr):
@@ -107,6 +107,19 @@ def get_num_stages(config):
         n += 1
         layout = layout[1]
     return n
+
+
+def collect_entropy_metrics(model, prefix=""):
+    """Collect entropy routing stats and learned params from all RoutingModules."""
+    metrics = {}
+    for module in model.modules():
+        if isinstance(module, RoutingModule) and module.entropy_routing:
+            s = module.stage_idx
+            metrics[f"{prefix}entropy/stage_{s}/running_mean"]  = module.entropy_mean.item()
+            metrics[f"{prefix}entropy/stage_{s}/running_std"]   = module.entropy_std.item()
+            metrics[f"{prefix}entropy/stage_{s}/threshold"]     = module.entropy_threshold.item()
+            metrics[f"{prefix}entropy/stage_{s}/temperature"]   = module.log_temperature.exp().item()
+    return metrics
 
 
 def print_rank0(msg, rank=None):
@@ -262,6 +275,7 @@ def validate(model, val_dataloader, cfg, step, device):
 
     total_ce_loss = torch.tensor(0.0, device=device)
     total_lb_loss = torch.tensor(0.0, device=device)
+    total_bm_loss = torch.tensor(0.0, device=device)
     total_ortho_loss = torch.tensor(0.0, device=device)
     total_bytes = 0
     num_batches = 0
@@ -282,7 +296,7 @@ def validate(model, val_dataloader, cfg, step, device):
         targets = batch[:, 1:]
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output = model(input_ids, mask=None)
+            output = model(input_ids, mask=None, targets=targets)
             logits = output.logits
 
             # Sum (not mean) CE loss so we can compute BPB correctly
@@ -300,12 +314,18 @@ def validate(model, val_dataloader, cfg, step, device):
                         ortho_loss += orthogonality_regularization_soft(module.k_proj_layer.weight)
 
             lb_loss = torch.tensor(0.0, device=device)
+            bm_loss = torch.tensor(0.0, device=device)
+
             if output.bpred_output:
                 for router_out in output.bpred_output:
                     lb_loss = lb_loss + load_balancing_loss(
                         router_out, N=cfg.downsample_n
                     )
+                    if router_out.bm_loss is not None:
+                        bm_loss += router_out.bm_loss
+                
                 lb_loss = lb_loss / len(output.bpred_output)
+                bm_loss = bm_loss / len(output.bpred_output)
 
                 # Accumulate compression metrics
                 batch_comp = compression_metrics(output.bpred_output)
@@ -314,6 +334,7 @@ def validate(model, val_dataloader, cfg, step, device):
 
         total_ce_loss += ce_loss_sum
         total_lb_loss += lb_loss
+        total_bm_loss += bm_loss
         total_ortho_loss += ortho_loss
         total_bytes += targets.numel()
         num_batches += 1
@@ -324,13 +345,14 @@ def validate(model, val_dataloader, cfg, step, device):
 
     # Aggregate across ranks
     if distributed:
-        stats = torch.tensor([total_ce_loss, total_lb_loss, total_ortho_loss, float(total_bytes), float(num_batches)], device=device)
+        stats = torch.tensor([total_ce_loss, total_lb_loss, total_ortho_loss, total_bm_loss, float(total_bytes), float(num_batches)], device=device)
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
         total_ce_loss = stats[0]
         total_lb_loss_sum = stats[1]
         total_ortho_loss = stats[2]
-        total_bytes = int(stats[3].item())
-        num_batches = int(stats[4].item())
+        total_bm_loss = stats[3]
+        total_bytes = int(stats[4].item())
+        num_batches = int(stats[5].item())
     else:
         total_lb_loss_sum = total_lb_loss
 
@@ -338,12 +360,14 @@ def validate(model, val_dataloader, cfg, step, device):
     avg_loss = (total_ce_loss / total_bytes).item()
     avg_lb = (total_lb_loss_sum / num_batches).item()
     avg_ortho = (total_ortho_loss / num_batches).item()
+    avg_bm_loss = (total_bm_loss / num_batches).item()
 
     metrics = {
         "val/loss": avg_loss,
         "val/bpb": bpb,
         "val/lb_loss": avg_lb,
         "val/ortho_loss": avg_ortho,
+        "val/bm_loss": avg_bm_loss,
         "step": step,
     }
 
@@ -351,8 +375,11 @@ def validate(model, val_dataloader, cfg, step, device):
     for k, vals in all_compression_metrics.items():
         metrics[f"val/{k}"] = sum(vals) / len(vals)
 
+    # Entropy routing stats (running EMA + learned params)
+    metrics.update(collect_entropy_metrics(model, prefix="val/"))
+
     print_rank0(
-        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f}",
+        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm_loss:.4f}",
         rank,
     )
 
@@ -364,6 +391,7 @@ def validate(model, val_dataloader, cfg, step, device):
 # ---------------------------------------------------------------------------
 
 def main():
+    torch.autograd.set_detect_anomaly(True)
     cfg = load_config()
 
     # ---- Distributed setup ----
@@ -549,6 +577,7 @@ def main():
     accum_lb_loss = 0.0
     accum_ortho_loss = 0.0
     accum_bm_loss = 0.0
+    accum_comp_metrics = defaultdict(float)
     accum_tokens = 0
     total_tokens = 0
     epoch = 0
@@ -575,6 +604,9 @@ def main():
         for base_lr, pg in zip(base_lrs, optimizer.param_groups):
             pg["lr"] = base_lr * lr_scale
 
+        batch_entropy_means = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
+        batch_entropy_stds = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
+        batch_entropy_element_counts = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
         for micro_step in range(cfg.grad_accum_steps):
             try:
                 batch = next(data_iter)
@@ -590,7 +622,7 @@ def main():
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 # mask=None triggers packed mode in the model
-                output = model(input_ids, mask=None)
+                output = model(input_ids, mask=None, targets=targets)
 
                 # AR cross-entropy loss
                 logits = output.logits  # (B, seq_len, vocab_size)
@@ -617,15 +649,16 @@ def main():
                         lb_loss = lb_loss + load_balancing_loss(
                             router_out, N=cfg.downsample_n
                         )
-                        if router_out.bm_logits is not None:
-                            bm_loss = bm_loss + nn.functional.cross_entropy(
-                                router_out.bm_logits.reshape(-1, router_out.bm_logits.size(-1)),
-                                targets.reshape(-1),
-                            )
+                        if router_out.entropy_mean is not None and router_out.entropy_std is not None:
+                            batch_entropy_means[router_out.stage_idx, micro_step] = router_out.entropy_mean
+                            batch_entropy_stds[router_out.stage_idx, micro_step] = router_out.entropy_std
+                            batch_entropy_element_counts[router_out.stage_idx, micro_step] = router_out.boundary_prob.numel()
+                        if router_out.bm_loss is not None:
+                            bm_loss += router_out.bm_loss
                     lb_loss = lb_loss / len(output.bpred_output)
                     bm_loss = bm_loss / len(output.bpred_output)
 
-                bm_loss_weight = cfg.get("bm_loss_weight", 1.0)
+                bm_loss_weight = cfg.get("bm_loss_weight", 0.1)
                 loss = ce_loss + cfg.alpha * lb_loss + ortho_reg_lambda * ortho_loss + bm_loss_weight * bm_loss
                 loss = loss / cfg.grad_accum_steps
 
@@ -636,6 +669,23 @@ def main():
             accum_ortho_loss += ortho_loss.detach().item() if isinstance(ortho_loss, torch.Tensor) else ortho_loss
             accum_bm_loss += bm_loss.detach().item()
             accum_tokens += targets.numel()
+            for k, v in compression_metrics(output.bpred_output).items():
+                accum_comp_metrics[k] += v
+
+        # clamp(min=1) prevents 0/0 NaN for stages without entropy routing;
+        # those stages have zero counts so their weights are 0/1=0, which is harmless
+        # since the module.entropy_routing guard below skips their EMA update anyway.
+        global_entropy_weights = batch_entropy_element_counts / batch_entropy_element_counts.sum(dim=-1, keepdim=True).clamp(min=1)
+        global_entropy_means = (batch_entropy_means * global_entropy_weights).sum(dim=-1)
+        global_entropy_var = (
+            (global_entropy_weights * batch_entropy_stds ** 2).sum(dim=-1) +
+            (global_entropy_weights * (batch_entropy_means - global_entropy_means.unsqueeze(-1)) ** 2).sum(dim=-1)
+        )
+        for module in model.modules():
+            if isinstance(module, RoutingModule) and module.entropy_routing:
+                stage_idx = module.stage_idx
+                module.entropy_mean.copy_((1 - cfg.entropy_decay) * module.entropy_mean + cfg.entropy_decay * global_entropy_means[stage_idx])
+                module.entropy_std.copy_((1 - cfg.entropy_decay) * module.entropy_std + cfg.entropy_decay * global_entropy_var[stage_idx].sqrt())
 
         # Per-module gradient norms (pre-clip, only on log steps to limit overhead)
         grad_norm_metrics = {}
@@ -686,6 +736,9 @@ def main():
                 rank,
             )
 
+            n_accum = cfg.grad_accum_steps * cfg.log_every
+            avg_comp_metrics = {f"train/{k}": v / n_accum for k, v in accum_comp_metrics.items()}
+
             if wandb_project and rank == 0:
                 import wandb
                 wandb.log({
@@ -701,12 +754,15 @@ def main():
                     "total_tokens": total_tokens,
                     "time_since_start": elapsed_time_since_training_start,
                     **grad_norm_metrics,
+                    **avg_comp_metrics,
+                    **collect_entropy_metrics(model),
                 }, step=step)
 
             accum_loss = 0.0
             accum_lb_loss = 0.0
             accum_ortho_loss = 0.0
             accum_bm_loss = 0.0
+            accum_comp_metrics = defaultdict(float)
             accum_tokens = 0
             elapsed_time_since_last_log = 0
 
@@ -725,6 +781,7 @@ def main():
         post_step_time = time.time() - step_end_time
         elapsed_time_since_last_log += post_step_time
         elapsed_time_since_training_start += post_step_time
+
 
     # Final checkpoint
     save_checkpoint(model, optimizer, step, cfg, cfg.checkpoint_dir, elapsed_time_since_training_start)

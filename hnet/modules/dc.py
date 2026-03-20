@@ -11,12 +11,9 @@ import torch.nn.functional as F
 
 from einops import repeat, rearrange
 
-from flash_attn.ops.triton.layer_norm import RMSNorm
-
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 from hnet.modules.utils import get_seq_idx
-from hnet.modules.block import create_block
 
 from hnet.models.config_hnet import RoutingConfig
 
@@ -26,7 +23,10 @@ class RoutingModuleOutput:
     boundary_prob: torch.Tensor
     boundary_mask: torch.Tensor
     selected_probs: torch.Tensor
-    bm_logits: Optional[torch.Tensor] = None
+    stage_idx: int
+    bm_loss: Optional[torch.Tensor] = None
+    entropy_mean: Optional[torch.Tensor] = None
+    entropy_std: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -57,10 +57,12 @@ class DeChunkState:
 
 class RoutingModule(nn.Module):
 
-    def __init__(self, d_model, routing_cfg: RoutingConfig, device=None, dtype=None):
+    def __init__(self, d_model, routing_cfg: RoutingConfig, stage_idx, device=None, dtype=None):
 
         self.d_model = d_model
         self.random = routing_cfg.random
+        self.stage_idx = stage_idx
+
         self.compression_ratio = routing_cfg.compression_ratio
 
         self.coding_rate = routing_cfg.coding_rate
@@ -68,8 +70,12 @@ class RoutingModule(nn.Module):
 
         self.identity_routing = routing_cfg.identity_routing
 
+        self.single_projection = routing_cfg.single_projection
+
         self.entropy_routing = routing_cfg.entropy_routing
         self.byte_vocab_size = routing_cfg.byte_vocab_size
+
+        self.bm_head_cos_routing = routing_cfg.bm_head_cos_routing
 
         self.multiheaded = routing_cfg.multiheaded
         self.d_similarity = routing_cfg.d_similarity if routing_cfg.d_similarity > 0 else d_model
@@ -94,6 +100,15 @@ class RoutingModule(nn.Module):
         # Byte-modelling Head
         if self.entropy_routing:
             self.bm_head = nn.Linear(self.d_model, self.byte_vocab_size, bias=False, **factory_kwargs)
+            self.log_temperature = nn.Parameter(torch.tensor(0.0))
+            self.entropy_threshold = nn.Parameter(torch.tensor(1.0))
+            self.register_buffer('entropy_mean', torch.tensor(0.0))
+            self.register_buffer('entropy_std', torch.tensor(0.0))
+            with torch.no_grad():
+                nn.init.normal_(self.bm_head.weight, mean=0.0, std=0.02)
+        
+        if self.bm_head_cos_routing:
+            self.bm_head = nn.Linear(self.d_model, self.byte_vocab_size, bias=False, **factory_kwargs)
 
         if self.multiheaded:
             self.head_gate_conv = nn.Conv1d(self.d_model, self.num_heads, kernel_size=self.window_size, bias=False, **factory_kwargs)
@@ -117,7 +132,14 @@ class RoutingModule(nn.Module):
             ),
         )
 
-    def forward(self, hidden_states, cu_seqlens=None, mask=None, inference_params=None) -> RoutingModuleOutput:
+    def forward(
+        self,
+        hidden_states,
+        cu_seqlens=None,
+        mask=None,
+        inference_params=None,
+        targets=None
+    ) -> RoutingModuleOutput:
         assert (mask is not None) or (
             cu_seqlens is not None
         ), "Either mask or cu_seqlens must be provided"
@@ -134,13 +156,22 @@ class RoutingModule(nn.Module):
             # We are in packed mode, so hidden_states is (T, D). Make it (B, T, D)
             hidden_states = hidden_states.unsqueeze(0)
 
-        bm_logits = None
+        bm_loss = None
+        boundary_prob = None
+        batch_entropy_mean = None
+        batch_entropy_std = None
 
         if self.identity_routing:
             cos_sim = torch.einsum(
                 "b l d, b l d -> b l",
                 F.normalize(hidden_states[:, :-1], dim=-1),
                 F.normalize(hidden_states[:, 1:], dim=-1),
+            )
+        if self.single_projection:
+            cos_sim = torch.einsum(
+                "b l d, b l d -> b l",
+                F.normalize(self.q_proj_layer(hidden_states[:, :-1]), dim=-1),
+                F.normalize(self.q_proj_layer(hidden_states[:, 1:]), dim=-1),
             )
         if self.random:
             B, T, D = hidden_states.shape
@@ -196,11 +227,41 @@ class RoutingModule(nn.Module):
             B, T, D = hidden_states.shape
             bm_logits = self.bm_head(hidden_states)  # (B, T, vocab_size)
             log_probs = bm_logits.log_softmax(-1)
-            # entropy in bits [0, log2(vocab_size)]
+            # entropy in bits [0, log2(vocab_size)=8]
             entropies = -(log_probs.exp() * log_probs).sum(-1) / math.log(2)  # (B, T)
-            # Map to cos_sim-like signal in [-1, 1]: high entropy → boundary (cos_sim → -1)
-            max_entropy = math.log2(self.byte_vocab_size)
-            cos_sim = 1.0 - 2.0 * (entropies[:, :-1] / max_entropy)  # (B, T-1)
+
+            with torch.no_grad():
+                batch_entropy_mean = entropies.mean()
+                batch_entropy_std = entropies.var().sqrt()
+                prev_entropy_mean = self.entropy_mean.detach()
+                prev_entropy_std = self.entropy_std.detach()
+
+            entropy_signal = (entropies - prev_entropy_mean) / (prev_entropy_std + 1e-6)
+            # print(f'entropy_signal: {entropy_signal[0, :20]}')
+
+            temperature = self.log_temperature.exp()
+            boundary_prob = torch.sigmoid((entropy_signal - self.entropy_threshold) / temperature)
+
+            # print(f'boundary_prob: {boundary_prob[0, :20]}')
+            if targets is not None:
+                bm_loss = nn.functional.cross_entropy(
+                    bm_logits.reshape(-1, bm_logits.size(-1)),
+                    targets.reshape(-1),
+                )
+        elif self.bm_head_cos_routing:
+            bm_logits = self.bm_head(hidden_states)  # (B, T, vocab_size)
+            log_probs = bm_logits.log_softmax(-1)
+
+            if targets is not None:
+                bm_loss = nn.functional.cross_entropy(
+                    bm_logits.reshape(-1, bm_logits.size(-1)),
+                    targets.reshape(-1),
+                )
+            cos_sim = torch.einsum(
+                "b l d, b l d -> b l",
+                F.normalize(self.q_proj_layer(hidden_states[:, :-1]), dim=-1),
+                F.normalize(self.k_proj_layer(hidden_states[:, 1:]), dim=-1),
+            )
         else:
             cos_sim = torch.einsum(
                 "b l d, b l d -> b l",
@@ -208,15 +269,16 @@ class RoutingModule(nn.Module):
                 F.normalize(self.k_proj_layer(hidden_states[:, 1:]), dim=-1),
             )
 
-        # this clamp should no-op as long as no precision issues are encountered
-        boundary_prob = torch.clamp(((1 - cos_sim) / 2), min=0.0, max=1.0)
-
-        # Force boundary probability of the first element to 1.0
         PAD_PROB = 1.0
-        boundary_prob = F.pad(boundary_prob, (1, 0), "constant", PAD_PROB)
+        if boundary_prob is None:
+            # this clamp should no-op as long as no precision issues are encountered
+            boundary_prob = torch.clamp(((1 - cos_sim) / 2), min=0.0, max=1.0)
+
+            # Force boundary probability of the first element to 1.0
+            boundary_prob = F.pad(boundary_prob, (1, 0), "constant", PAD_PROB)
 
         if cu_seqlens is not None:
-            boundary_prob = boundary_prob.squeeze(0)
+            boundary_prob = boundary_prob.squeeze(0).clone()
             boundary_prob[cu_seqlens[:-1]] = PAD_PROB
 
         boundary_prob = torch.stack(((1 - boundary_prob), boundary_prob), dim=-1)
@@ -255,7 +317,10 @@ class RoutingModule(nn.Module):
             boundary_prob=boundary_prob,  # (shape hidden_states.shape[:-1], 2)
             boundary_mask=boundary_mask,  # (shape hidden_states.shape[:-1])
             selected_probs=selected_probs,  # (shape hidden_states.shape[:-1], 1)
-            bm_logits=bm_logits,  # (B, T, vocab_size) or None
+            bm_loss=bm_loss,  # scalar or None
+            stage_idx=self.stage_idx,
+            entropy_mean=batch_entropy_mean,
+            entropy_std=batch_entropy_std,
         )
 
     def step(self, hidden_states, inference_params):
@@ -365,7 +430,7 @@ class DeChunkLayer(nn.Module):
         cu_seqlens=None,
         inference_params=None,
         mask=None,
-    ):
+    ):        
         if inference_params is not None:
             assert (
                 mask is not None
@@ -402,7 +467,6 @@ class DeChunkLayer(nn.Module):
         )
         b = p.to(self.dtype)
         c = torch.ones_like(b)
-
         out = mamba_chunk_scan_combined(
             rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
             repeat(dt, "b l -> b l h", h=self.nheads),

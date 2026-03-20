@@ -110,6 +110,7 @@ class HNet(nn.Module):
             self.routing_module = RoutingModule(
                 self.d_model,
                 config.routing_cfg,
+                stage_idx,
                 **factory_kwargs)
             self.chunk_layer = ChunkLayer()
             self.dechunk_layer = DeChunkLayer(self.d_model)
@@ -223,6 +224,7 @@ class HNet(nn.Module):
         max_seqlen=None,
         mask=None,
         inference_params=None,
+        targets=None,
         **mixer_kwargs,
     ):
         assert mask is not None or (
@@ -275,6 +277,7 @@ class HNet(nn.Module):
             cu_seqlens=cu_seqlens,
             mask=mask,
             inference_params=inference_params.routing_module_state,
+            targets=targets
         )
         hidden_states, next_cu_seqlens, next_max_seqlen, next_mask = self.chunk_layer(
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
@@ -289,6 +292,7 @@ class HNet(nn.Module):
             max_seqlen=next_max_seqlen,
             mask=next_mask,
             inference_params=inference_params.main_network_state,
+            targets=targets,
             **mixer_kwargs,
         )
 

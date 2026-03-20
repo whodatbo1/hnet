@@ -33,6 +33,8 @@ class RoutingConfig:
     identity_routing: bool = False
     entropy_routing: bool = False
     byte_vocab_size: int = 256
+    single_projection: bool = False
+    bm_head_cos_routing: bool = False
 
 @dataclass
 class HNetConfig:
