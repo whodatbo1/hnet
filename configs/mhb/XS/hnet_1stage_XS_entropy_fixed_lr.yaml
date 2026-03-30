@@ -2,7 +2,7 @@
 # Override any field via CLI: python train.py --config configs/train/default.yaml --lr 1e-3
 
 # --- Model ---
-model_config: configs/mhb/XS/hnet_1stage_XS_entropy.json
+model_config: configs/mhb/XS/hnet_1stage_XS_entropy_fixed_lr.json
 
 # Per-stage LR multipliers (outer to inner). Set to null to disable.
 # Example for 2-stage: [3.0, 1.7, 0.9]
@@ -45,14 +45,14 @@ val_fraction: 0.005       # Fraction of streaming documents reserved for validat
 val_batches: 128          # Number of micro-batches per validation run
 
 # --- Checkpointing ---
-checkpoint_dir: /projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XS/hnet_1stage_XS_entropy
+checkpoint_dir: /projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XS/hnet_1stage_XS_entropy_fixed_lr
 save_every: 250
 resume: true
 
 # --- Logging ---
 log_every: 10
 wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
-wandb_run_name: "train_hnet_1stage_XS_entropy"
+wandb_run_name: "train_hnet_1stage_XS_entropy_fixed_lr"
 
 # --- Memory ---
 activation_checkpointing: false

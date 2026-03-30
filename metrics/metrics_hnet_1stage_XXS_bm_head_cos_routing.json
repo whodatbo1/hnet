@@ -1,0 +1,131 @@
+{
+  "model_path_template": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_bm_head_cos_routing/model_step{step}.pt",
+  "model_config_path": "configs/mhb/XXS/hnet_1stage_XXS_bm_head_cos_routing.json",
+  "steps": [
+    {
+      "step": 500,
+      "routing_modules": [
+        {
+          "Q": {
+            "singular_values": {
+              "min": 0.003,
+              "max": 10.475,
+              "mean": 0.768,
+              "std": 0.94,
+              "top10": [
+                10.475,
+                6.637,
+                5.438,
+                3.654,
+                3.447,
+                3.03,
+                2.902,
+                2.486,
+                2.378,
+                2.293
+              ],
+              "num_deviating_01": 233,
+              "num_dead_001": 2
+            },
+            "frobenius_distance_from_I": 17.575,
+            "orthogonality_distance": 122.894,
+            "effective_rank": {
+              "90pct": 90,
+              "99pct": 187,
+              "999pct": 222
+            }
+          },
+          "K": {
+            "singular_values": {
+              "min": 0.003,
+              "max": 10.931,
+              "mean": 0.765,
+              "std": 0.961,
+              "top10": [
+                10.931,
+                6.721,
+                5.404,
+                3.689,
+                3.614,
+                3.14,
+                2.84,
+                2.564,
+                2.449,
+                2.218
+              ],
+              "num_deviating_01": 233,
+              "num_dead_001": 2
+            },
+            "frobenius_distance_from_I": 17.905,
+            "orthogonality_distance": 132.061,
+            "effective_rank": {
+              "90pct": 88,
+              "99pct": 187,
+              "999pct": 222
+            }
+          },
+          "QK_principal_angles_top20": [
+            0.998,
+            0.995,
+            0.993,
+            0.983,
+            0.981,
+            0.975,
+            0.97,
+            0.962,
+            0.958,
+            0.946,
+            0.926,
+            0.908,
+            0.897,
+            0.882,
+            0.856,
+            0.839,
+            0.813,
+            0.656,
+            0.433,
+            0.346
+          ],
+          "QK_pairwise_alignment_top5": [
+            [
+              0.95,
+              0.214,
+              0.171,
+              0.03,
+              0.051
+            ],
+            [
+              0.263,
+              0.851,
+              0.375,
+              0.092,
+              0.034
+            ],
+            [
+              0.084,
+              0.401,
+              0.873,
+              0.135,
+              0.047
+            ],
+            [
+              0.013,
+              0.032,
+              0.186,
+              0.811,
+              0.431
+            ],
+            [
+              0.062,
+              0.11,
+              0.066,
+              0.117,
+              0.384
+            ]
+          ],
+          "depth": 0
+        }
+      ]
+    }
+  ]
+}

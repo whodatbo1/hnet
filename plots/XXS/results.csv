@@ -1,0 +1,14 @@
+model,LAMBADA (acc),HellaSwag (acc_norm),PIQA (acc),ARC-Easy (acc),ARC-Challenge (acc_norm),WinoGrande (acc),OpenBookQA (acc_norm)
+hnet_1stage_XXS_baseline,8.21±0.38,28.34±0.45,55.11±1.16,30.72±0.95,21.84±1.21,48.86±1.40,26.40±1.97
+hnet_1stage_XXS_baseline_compression_12,6.87±0.35,28.45±0.45,55.60±1.16,30.35±0.94,21.59±1.20,49.25±1.41,26.60±1.98
+hnet_1stage_XXS_baseline_compression_24,7.92±0.38,28.26±0.45,55.50±1.16,30.51±0.94,20.05±1.17,49.96±1.41,25.60±1.95
+hnet_1stage_XXS_baseline_compression_annealing,8.15±0.38,28.74±0.45,55.66±1.16,29.71±0.94,22.27±1.22,50.91±1.41,26.60±1.98
+hnet_1stage_XXS_bm_head_cos_routing,8.21±0.38,28.74±0.45,54.79±1.16,30.30±0.94,20.22±1.17,49.88±1.41,27.80±2.01
+hnet_1stage_XXS_entropy,8.93±0.40,28.12±0.45,55.71±1.16,30.81±0.95,21.67±1.20,49.09±1.41,26.40±1.97
+hnet_1stage_XXS_entropy_certainty_loss,5.57±0.32,27.97±0.45,55.44±1.16,30.60±0.95,20.73±1.18,48.30±1.40,25.60±1.95
+hnet_1stage_XXS_entropy_certainty_loss_0-003,7.26±0.36,28.30±0.45,56.15±1.16,29.63±0.94,22.27±1.22,50.12±1.41,26.40±1.97
+hnet_1stage_XXS_entropy_compression_12,4.79±0.30,27.88±0.45,54.73±1.16,29.63±0.94,21.33±1.20,50.36±1.41,26.40±1.97
+hnet_1stage_XXS_entropy_compression_24,7.08±0.36,28.20±0.45,56.20±1.16,29.63±0.94,21.59±1.20,50.75±1.41,27.20±1.99
+hnet_1stage_XXS_entropy_compression_3,6.11±0.33,28.15±0.45,54.90±1.16,30.26±0.94,20.48±1.18,50.20±1.41,25.60±1.95
+hnet_1stage_XXS_entropy_compression_annealing,6.93±0.35,27.47±0.45,54.84±1.16,31.61±0.95,21.25±1.20,49.72±1.41,26.20±1.97
+hnet_1stage_XXS_entropy_static_thresholding,0.00±0.00,25.09±0.43,52.99±1.16,27.95±0.92,23.72±1.24,49.33±1.41,27.20±1.99

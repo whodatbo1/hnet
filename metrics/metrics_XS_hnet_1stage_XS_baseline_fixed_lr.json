@@ -1,0 +1,5 @@
+{
+  "model_path_template": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XS/hnet_1stage_XS_baseline_fixed_lr/model_step{step}.pt",
+  "model_config_path": "configs/mhb/XS/hnet_1stage_XS_baseline_fixed_lr.json",
+  "steps": []
+}

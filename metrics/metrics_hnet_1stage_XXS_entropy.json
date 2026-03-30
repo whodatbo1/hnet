@@ -1,0 +1,256 @@
+{
+  "model_path_template": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_entropy/model_step{step}.pt",
+  "model_config_path": "configs/mhb/XXS/hnet_1stage_XXS_entropy.json",
+  "steps": [
+    {
+      "step": 500,
+      "routing_modules": [
+        {
+          "Q": {
+            "singular_values": {
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "std": 0.0,
+              "top10": [
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "num_deviating_01": 0,
+              "num_dead_001": 0
+            },
+            "frobenius_distance_from_I": 0.0,
+            "orthogonality_distance": 0.0,
+            "effective_rank": {
+              "90pct": 231,
+              "99pct": 254,
+              "999pct": 256
+            }
+          },
+          "K": {
+            "singular_values": {
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "std": 0.0,
+              "top10": [
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "num_deviating_01": 0,
+              "num_dead_001": 0
+            },
+            "frobenius_distance_from_I": 0.0,
+            "orthogonality_distance": 0.0,
+            "effective_rank": {
+              "90pct": 231,
+              "99pct": 254,
+              "999pct": 256
+            }
+          },
+          "QK_principal_angles_top20": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "QK_pairwise_alignment_top5": [
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "depth": 0
+        }
+      ]
+    },
+    {
+      "step": 1000,
+      "routing_modules": [
+        {
+          "Q": {
+            "singular_values": {
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "std": 0.0,
+              "top10": [
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "num_deviating_01": 0,
+              "num_dead_001": 0
+            },
+            "frobenius_distance_from_I": 0.0,
+            "orthogonality_distance": 0.0,
+            "effective_rank": {
+              "90pct": 231,
+              "99pct": 254,
+              "999pct": 256
+            }
+          },
+          "K": {
+            "singular_values": {
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "std": 0.0,
+              "top10": [
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "num_deviating_01": 0,
+              "num_dead_001": 0
+            },
+            "frobenius_distance_from_I": 0.0,
+            "orthogonality_distance": 0.0,
+            "effective_rank": {
+              "90pct": 231,
+              "99pct": 254,
+              "999pct": 256
+            }
+          },
+          "QK_principal_angles_top20": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "QK_pairwise_alignment_top5": [
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "depth": 0
+        }
+      ]
+    }
+  ]
+}

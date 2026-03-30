@@ -1,7 +1,7 @@
 {
-    "arch_layout": ["m4", ["T22"], "m4"],
-    "d_model": [512, 768],
-    "d_intermediate": [0, 2048],
+    "arch_layout": ["m4", ["T12"], "m4"],
+    "d_model": [256, 384],
+    "d_intermediate": [0, 512],
     "vocab_size": 256,
     "ssm_cfg": {
         "chunk_size": 256,
@@ -11,7 +11,7 @@
     },
     "attn_cfg": {
         "num_heads": [16, 16],
-        "rotary_emb_dim": [32, 48],
+        "rotary_emb_dim": [16, 24],
         "window_size": [1023, -1]
     },
     "tie_embeddings": false,
