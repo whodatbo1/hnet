@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_entropy_compression_12/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_entropy_compression_12.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132902",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.1757679180887372,
+      "acc_stderr,none": 0.011122850863120384,
+      "acc_norm,none": 0.21331058020477817,
+      "acc_norm_stderr,none": 0.011970971742326334
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.2962962962962963,
+      "acc_stderr,none": 0.009369711585684086,
+      "acc_norm,none": 0.3114478114478115,
+      "acc_norm_stderr,none": 0.009502311567905436
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27375024895439154,
+      "acc_stderr,none": 0.004449710700861623,
+      "acc_norm,none": 0.2788289185421231,
+      "acc_norm_stderr,none": 0.004475067344626854
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 1205.465704237185,
+      "perplexity_stderr,none": 47.9548785778902,
+      "acc,none": 0.04793324277120124,
+      "acc_stderr,none": 0.002976214162195714
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.118,
+      "acc_stderr,none": 0.014441922942480794,
+      "acc_norm,none": 0.264,
+      "acc_norm_stderr,none": 0.01973288558592215
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5473340587595212,
+      "acc_stderr,none": 0.01161343165087302,
+      "acc_norm,none": 0.5369967355821545,
+      "acc_norm_stderr,none": 0.011633844942776493
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5035516969218626,
+      "acc_stderr,none": 0.014052131146915852
+    }
+  }
+}

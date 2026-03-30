@@ -100,8 +100,13 @@ class RoutingModule(nn.Module):
         # Byte-modelling Head
         if self.entropy_routing:
             self.bm_head = nn.Linear(self.d_model, self.byte_vocab_size, bias=False, **factory_kwargs)
-            self.log_temperature = nn.Parameter(torch.tensor(0.0))
-            self.entropy_threshold = nn.Parameter(torch.tensor(1.0))
+            if routing_cfg.learn_entropy_thresholds:
+                self.log_temperature = nn.Parameter(torch.tensor(0.0))
+                self.entropy_threshold = nn.Parameter(torch.tensor(1.0))
+            else:
+                self.log_temperature = torch.tensor(0.0)
+                self.entropy_threshold = torch.tensor(1.0)
+            
             self.register_buffer('entropy_mean', torch.tensor(0.0))
             self.register_buffer('entropy_std', torch.tensor(0.0))
             with torch.no_grad():
@@ -324,29 +329,87 @@ class RoutingModule(nn.Module):
         )
 
     def step(self, hidden_states, inference_params):
+        assert self.multiheaded is False, "step() not implemented for Multiheaded BP"
+        assert self.coding_rate is False, "step() not implemented for Coding Rate BP"
+        
         # hidden_states is (B, 1, D)
-        hidden_states = hidden_states.squeeze(1)
-        cos_sim = torch.einsum(
-            "b d, b d -> b",
-            F.normalize(self.q_proj_layer(inference_params.last_hidden_state), dim=-1),
-            F.normalize(self.k_proj_layer(hidden_states), dim=-1),
-        )
-        boundary_prob = torch.clamp(((1 - cos_sim) / 2), min=0.0, max=1.0)
-        inference_params.last_hidden_state.copy_(hidden_states)
-        boundary_prob = torch.where(
-            inference_params.has_seen_tokens,
-            boundary_prob,
-            torch.ones_like(boundary_prob),
-        )
-        boundary_prob = torch.stack(((1 - boundary_prob), boundary_prob), dim=-1)
+        hidden_states = hidden_states.squeeze(1)  # (B, D)
+        B = hidden_states.shape[0]
 
+        boundary_prob_scalar = None
+        cos_sim = None
+
+        # --- Independent flags (mirror forward's standalone ifs) ---
+        if self.identity_routing:
+            cos_sim = torch.einsum(
+                "b d, b d -> b",
+                F.normalize(inference_params.last_hidden_state, dim=-1),
+                F.normalize(hidden_states, dim=-1),
+            )
+        if self.single_projection:
+            cos_sim = torch.einsum(
+                "b d, b d -> b",
+                F.normalize(self.q_proj_layer(inference_params.last_hidden_state), dim=-1),
+                F.normalize(self.q_proj_layer(hidden_states), dim=-1),
+            )
+
+        # --- Main routing mode dispatch (mirrors forward's elif chain) ---
+        if self.random:
+            # Bernoulli sample at rate 1/compression_ratio (forward uses exact k-of-N)
+            is_boundary = torch.rand(B, device=hidden_states.device) < (1.0 / self.compression_ratio)
+            cos_sim = torch.where(
+                is_boundary,
+                torch.full((B,), -1.0, device=hidden_states.device),
+                torch.ones(B, device=hidden_states.device),
+            )
+        # coding_rate: not implemented for step
+        # multiheaded: not implemented for step (requires hidden-state window)
+        elif self.entropy_routing:
+            bm_logits = self.bm_head(hidden_states)  # (B, vocab_size)
+            log_probs = bm_logits.log_softmax(-1)
+            entropies = -(log_probs.exp() * log_probs).sum(-1) / math.log(2)  # (B,)
+            entropy_signal = (entropies.detach() - self.entropy_mean) / (self.entropy_std + 1e-6)
+            temperature = self.log_temperature.exp()
+            boundary_prob_scalar = torch.sigmoid(
+                (entropy_signal - self.entropy_threshold) / temperature
+            )
+        elif self.bm_head_cos_routing:
+            # bm_head is not queried at inference (no targets); routing uses Q/K cos-sim
+            cos_sim = torch.einsum(
+                "b d, b d -> b",
+                F.normalize(self.q_proj_layer(inference_params.last_hidden_state), dim=-1),
+                F.normalize(self.k_proj_layer(hidden_states), dim=-1),
+            )
+        else:
+            # Default Q/K cosine-similarity routing
+            cos_sim = torch.einsum(
+                "b d, b d -> b",
+                F.normalize(self.q_proj_layer(inference_params.last_hidden_state), dim=-1),
+                F.normalize(self.k_proj_layer(hidden_states), dim=-1),
+            )
+
+        if boundary_prob_scalar is None:
+            boundary_prob_scalar = torch.clamp((1 - cos_sim) / 2, min=0.0, max=1.0)
+
+        # Always update last_hidden_state (used by all cos-sim modes)
+        inference_params.last_hidden_state.copy_(hidden_states)
+
+        # Force the first token of each sequence to be a boundary
+        boundary_prob_scalar = torch.where(
+            inference_params.has_seen_tokens,
+            boundary_prob_scalar,
+            torch.ones_like(boundary_prob_scalar),
+        )
         inference_params.has_seen_tokens.copy_(
             torch.ones_like(inference_params.has_seen_tokens)
         )
+
+        boundary_prob = torch.stack(((1 - boundary_prob_scalar), boundary_prob_scalar), dim=-1)
         return RoutingModuleOutput(
             boundary_prob=boundary_prob,  # (B, 2)
             boundary_mask=boundary_prob[..., 1] > 0.5,  # (B,)
             selected_probs=boundary_prob.max(dim=-1).values.unsqueeze(-1),  # (B, 1)
+            stage_idx=self.stage_idx,
         )
 
 

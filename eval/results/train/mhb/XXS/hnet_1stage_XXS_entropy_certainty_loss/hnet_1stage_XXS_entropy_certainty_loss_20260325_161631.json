@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_entropy_certainty_loss/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_entropy_certainty_loss.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_161631",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17064846416382254,
+      "acc_stderr,none": 0.010993654168413736,
+      "acc_norm,none": 0.20733788395904437,
+      "acc_norm_stderr,none": 0.011846905782971264
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.30597643097643096,
+      "acc_stderr,none": 0.00945582203642661,
+      "acc_norm,none": 0.3042929292929293,
+      "acc_norm_stderr,none": 0.009441202922359051
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27185819557857,
+      "acc_stderr,none": 0.0044400791732768724,
+      "acc_norm,none": 0.27972515435172274,
+      "acc_norm_stderr,none": 0.004479467619464623
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 969.9847968970862,
+      "perplexity_stderr,none": 38.56801081117002,
+      "acc,none": 0.055695711236173104,
+      "acc_stderr,none": 0.0031950593588073433
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.118,
+      "acc_stderr,none": 0.014441922942480794,
+      "acc_norm,none": 0.256,
+      "acc_norm_stderr,none": 0.019536923574747664
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5544069640914037,
+      "acc_stderr,none": 0.011596554080987587,
+      "acc_norm,none": 0.5413492927094669,
+      "acc_norm_stderr,none": 0.011625864113315981
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.48303078137332284,
+      "acc_stderr,none": 0.014044390401613118
+    }
+  }
+}

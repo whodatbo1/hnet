@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_baseline_compression_annealing/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_baseline_compression_annealing.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132904",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17406143344709898,
+      "acc_stderr,none": 0.011080177129482198,
+      "acc_norm,none": 0.2226962457337884,
+      "acc_norm_stderr,none": 0.012158314774829888
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.29713804713804715,
+      "acc_stderr,none": 0.009377397867796908,
+      "acc_norm,none": 0.30934343434343436,
+      "acc_norm_stderr,none": 0.009484615220606778
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27235610436168095,
+      "acc_stderr,none": 0.0044426235908463195,
+      "acc_norm,none": 0.28739294961163114,
+      "acc_norm_stderr,none": 0.004516215206714907
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 576.3729097161171,
+      "perplexity_stderr,none": 22.585564926359947,
+      "acc,none": 0.08150591888220454,
+      "acc_stderr,none": 0.0038119292177703355
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.126,
+      "acc_stderr,none": 0.01485561775078758,
+      "acc_norm,none": 0.266,
+      "acc_norm_stderr,none": 0.019780559675655396
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5565832426550599,
+      "acc_stderr,none": 0.011590883373666913,
+      "acc_norm,none": 0.5369967355821545,
+      "acc_norm_stderr,none": 0.011633844942776493
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5090765588003157,
+      "acc_stderr,none": 0.014050170094497657
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_entropy_compression_3/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_entropy_compression_3.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132904",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17320819112627986,
+      "acc_stderr,none": 0.011058694183280343,
+      "acc_norm,none": 0.20477815699658702,
+      "acc_norm_stderr,none": 0.011792544338513443
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.3026094276094276,
+      "acc_stderr,none": 0.009426434542371222,
+      "acc_norm,none": 0.3068181818181818,
+      "acc_norm_stderr,none": 0.009463075835198769
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27126070503883687,
+      "acc_stderr,none": 0.0044370166009568435,
+      "acc_norm,none": 0.2815176259709221,
+      "acc_norm_stderr,none": 0.004488201756642371
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 924.2709811604294,
+      "perplexity_stderr,none": 37.00759801151148,
+      "acc,none": 0.06112943916165341,
+      "acc_stderr,none": 0.0033376449775847296
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.128,
+      "acc_stderr,none": 0.014955913837590627,
+      "acc_norm,none": 0.256,
+      "acc_norm_stderr,none": 0.019536923574747664
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5489662676822633,
+      "acc_stderr,none": 0.011609747200732922,
+      "acc_norm,none": 0.5391730141458106,
+      "acc_norm_stderr,none": 0.011629966056957037
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5019731649565904,
+      "acc_stderr,none": 0.014052376259225643
+    }
+  }
+}

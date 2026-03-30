@@ -35,7 +35,7 @@ from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetConfig
 from hnet.modules.block import Block
 from hnet.utils.data import create_dataloaders
-from hnet.utils.train import load_balancing_loss, group_params, orthogonality_regularization_soft
+from hnet.utils.train import load_balancing_loss, certainty_loss, group_params, orthogonality_regularization_soft, get_compression_ratio
 from hnet.utils.eval import bits_per_byte, compression_metrics
 from hnet.modules.dc import RoutingModule
 
@@ -258,7 +258,7 @@ def load_config(argv=None):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def validate(model, val_dataloader, cfg, step, device):
+def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
     """Run validation and return metrics dict.
 
     Computes:
@@ -275,6 +275,7 @@ def validate(model, val_dataloader, cfg, step, device):
 
     total_ce_loss = torch.tensor(0.0, device=device)
     total_lb_loss = torch.tensor(0.0, device=device)
+    total_cert_loss = torch.tensor(0.0, device=device)
     total_bm_loss = torch.tensor(0.0, device=device)
     total_ortho_loss = torch.tensor(0.0, device=device)
     total_bytes = 0
@@ -282,6 +283,8 @@ def validate(model, val_dataloader, cfg, step, device):
     all_compression_metrics = {}
 
     val_batches = cfg.get("val_batches", 50)
+    if downsample_n is None:
+        downsample_n = cfg.downsample_n
 
     ortho_reg_lambda = cfg.get("ortho_reg_lambda", 0.0)
     if not ortho_reg_lambda:
@@ -314,17 +317,20 @@ def validate(model, val_dataloader, cfg, step, device):
                         ortho_loss += orthogonality_regularization_soft(module.k_proj_layer.weight)
 
             lb_loss = torch.tensor(0.0, device=device)
+            cert_loss = torch.tensor(0.0, device=device)
             bm_loss = torch.tensor(0.0, device=device)
 
             if output.bpred_output:
                 for router_out in output.bpred_output:
                     lb_loss = lb_loss + load_balancing_loss(
-                        router_out, N=cfg.downsample_n
+                        router_out, N=downsample_n
                     )
+                    cert_loss = cert_loss + certainty_loss(router_out)
                     if router_out.bm_loss is not None:
                         bm_loss += router_out.bm_loss
-                
+
                 lb_loss = lb_loss / len(output.bpred_output)
+                cert_loss = cert_loss / len(output.bpred_output)
                 bm_loss = bm_loss / len(output.bpred_output)
 
                 # Accumulate compression metrics
@@ -334,6 +340,7 @@ def validate(model, val_dataloader, cfg, step, device):
 
         total_ce_loss += ce_loss_sum
         total_lb_loss += lb_loss
+        total_cert_loss += cert_loss
         total_bm_loss += bm_loss
         total_ortho_loss += ortho_loss
         total_bytes += targets.numel()
@@ -345,20 +352,22 @@ def validate(model, val_dataloader, cfg, step, device):
 
     # Aggregate across ranks
     if distributed:
-        stats = torch.tensor([total_ce_loss, total_lb_loss, total_ortho_loss, total_bm_loss, float(total_bytes), float(num_batches)], device=device)
+        stats = torch.tensor([total_ce_loss, total_lb_loss, total_cert_loss, total_ortho_loss, total_bm_loss, float(total_bytes), float(num_batches)], device=device)
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
         total_ce_loss = stats[0]
         total_lb_loss_sum = stats[1]
-        total_ortho_loss = stats[2]
-        total_bm_loss = stats[3]
-        total_bytes = int(stats[4].item())
-        num_batches = int(stats[5].item())
+        total_cert_loss = stats[2]
+        total_ortho_loss = stats[3]
+        total_bm_loss = stats[4]
+        total_bytes = int(stats[5].item())
+        num_batches = int(stats[6].item())
     else:
         total_lb_loss_sum = total_lb_loss
 
     bpb = bits_per_byte(total_ce_loss, total_bytes)
     avg_loss = (total_ce_loss / total_bytes).item()
     avg_lb = (total_lb_loss_sum / num_batches).item()
+    avg_cert = (total_cert_loss / num_batches).item()
     avg_ortho = (total_ortho_loss / num_batches).item()
     avg_bm_loss = (total_bm_loss / num_batches).item()
 
@@ -366,6 +375,7 @@ def validate(model, val_dataloader, cfg, step, device):
         "val/loss": avg_loss,
         "val/bpb": bpb,
         "val/lb_loss": avg_lb,
+        "val/cert_loss": avg_cert,
         "val/ortho_loss": avg_ortho,
         "val/bm_loss": avg_bm_loss,
         "step": step,
@@ -379,7 +389,7 @@ def validate(model, val_dataloader, cfg, step, device):
     metrics.update(collect_entropy_metrics(model, prefix="val/"))
 
     print_rank0(
-        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm_loss:.4f}",
+        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | cert_loss={avg_cert:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm_loss:.4f}",
         rank,
     )
 
@@ -575,6 +585,7 @@ def main():
     step = start_step
     accum_loss = 0.0
     accum_lb_loss = 0.0
+    accum_cert_loss = 0.0
     accum_ortho_loss = 0.0
     accum_bm_loss = 0.0
     accum_comp_metrics = defaultdict(float)
@@ -603,6 +614,13 @@ def main():
             print_rank0(f"Setting lr_scale: {lr_scale}")
         for base_lr, pg in zip(base_lrs, optimizer.param_groups):
             pg["lr"] = base_lr * lr_scale
+
+        compression_schedule = cfg.get("compression_schedule", None)
+        current_downsample_n = (
+            get_compression_ratio(step, max_steps, compression_schedule)
+            if compression_schedule is not None
+            else cfg.downsample_n
+        )
 
         batch_entropy_means = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
         batch_entropy_stds = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
@@ -642,13 +660,15 @@ def main():
 
                 # Load balancing loss across routing stages
                 lb_loss = torch.tensor(0.0, device=device)
+                cert_loss = torch.tensor(0.0, device=device)
                 bm_loss = torch.tensor(0.0, device=device)
 
                 if output.bpred_output:
                     for router_out in output.bpred_output:
                         lb_loss = lb_loss + load_balancing_loss(
-                            router_out, N=cfg.downsample_n
+                            router_out, N=current_downsample_n
                         )
+                        cert_loss = cert_loss + certainty_loss(router_out)
                         if router_out.entropy_mean is not None and router_out.entropy_std is not None:
                             batch_entropy_means[router_out.stage_idx, micro_step] = router_out.entropy_mean
                             batch_entropy_stds[router_out.stage_idx, micro_step] = router_out.entropy_std
@@ -656,16 +676,19 @@ def main():
                         if router_out.bm_loss is not None:
                             bm_loss += router_out.bm_loss
                     lb_loss = lb_loss / len(output.bpred_output)
+                    cert_loss = cert_loss / len(output.bpred_output)
                     bm_loss = bm_loss / len(output.bpred_output)
 
                 bm_loss_weight = cfg.get("bm_loss_weight", 0.1)
-                loss = ce_loss + cfg.alpha * lb_loss + ortho_reg_lambda * ortho_loss + bm_loss_weight * bm_loss
+                cert_loss_weight = cfg.get("cert_loss_weight", 0.0)
+                loss = ce_loss + cfg.alpha * lb_loss + cert_loss_weight * cert_loss + ortho_reg_lambda * ortho_loss + bm_loss_weight * bm_loss
                 loss = loss / cfg.grad_accum_steps
 
             loss.backward()
 
             accum_loss += ce_loss.detach().item()
             accum_lb_loss += lb_loss.detach().item()
+            accum_cert_loss += cert_loss.detach().item()
             accum_ortho_loss += ortho_loss.detach().item() if isinstance(ortho_loss, torch.Tensor) else ortho_loss
             accum_bm_loss += bm_loss.detach().item()
             accum_tokens += targets.numel()
@@ -716,21 +739,25 @@ def main():
         if step % cfg.log_every == 0:
             avg_loss = accum_loss / (cfg.grad_accum_steps * cfg.log_every)
             avg_lb = accum_lb_loss / (cfg.grad_accum_steps * cfg.log_every)
+            avg_cert = accum_cert_loss / (cfg.grad_accum_steps * cfg.log_every)
             avg_ortho = accum_ortho_loss / (cfg.grad_accum_steps * cfg.log_every)
             avg_bm = accum_bm_loss / (cfg.grad_accum_steps * cfg.log_every)
-            
+
             tokens_per_sec = accum_tokens / elapsed_time_since_last_log
             total_tokens += accum_tokens
             current_lr = optimizer.param_groups[0]["lr"]
 
             if distributed:
                 # Average loss across ranks
-                loss_tensor = torch.tensor([avg_loss, avg_lb, avg_ortho, avg_bm], device=device)
+                loss_tensor = torch.tensor([avg_loss, avg_lb, avg_cert, avg_ortho, avg_bm], device=device)
                 dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-                avg_loss, avg_lb, avg_ortho, avg_bm = loss_tensor[0].item(), loss_tensor[1].item(), loss_tensor[2].item(), loss_tensor[3].item()
+                avg_loss, avg_lb, avg_cert, avg_ortho, avg_bm = (
+                    loss_tensor[0].item(), loss_tensor[1].item(), loss_tensor[2].item(),
+                    loss_tensor[3].item(), loss_tensor[4].item()
+                )
 
             print_rank0(
-                f"step={step:>6d} | epoch={epoch} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm:.4f} | "
+                f"step={step:>6d} | epoch={epoch} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | cert_loss={avg_cert:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm:.4f} | "
                 f"grad_norm={grad_norm:.3f} | lr={current_lr:.2e} | "
                 f"tok/s={tokens_per_sec:.0f} | time_since_start={elapsed_time_since_training_start}",
                 rank,
@@ -744,10 +771,12 @@ def main():
                 wandb.log({
                     "loss": avg_loss,
                     "lb_loss": avg_lb,
+                    "cert_loss": avg_cert,
                     "ortho_loss": avg_ortho,
                     "bm_loss": avg_bm,
                     "grad_norm": grad_norm,
                     "lr": current_lr,
+                    "compression_ratio": current_downsample_n,
                     "tokens_per_sec": tokens_per_sec,
                     "step": step,
                     "epoch": epoch,
@@ -760,6 +789,7 @@ def main():
 
             accum_loss = 0.0
             accum_lb_loss = 0.0
+            accum_cert_loss = 0.0
             accum_ortho_loss = 0.0
             accum_bm_loss = 0.0
             accum_comp_metrics = defaultdict(float)
@@ -767,7 +797,7 @@ def main():
             elapsed_time_since_last_log = 0
 
         if cfg.get("validate_every", 0) > 0 and step % cfg.validate_every == 0:
-            val_metrics = validate(model, val_dataloader, cfg, step, device)
+            val_metrics = validate(model, val_dataloader, cfg, step, device, downsample_n=current_downsample_n)
             if val_metrics and wandb_project and rank == 0:
                 import wandb
                 wandb.log(val_metrics)

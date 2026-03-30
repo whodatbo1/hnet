@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_entropy_compression_annealing/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_entropy_compression_annealing.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132908",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17320819112627986,
+      "acc_stderr,none": 0.011058694183280343,
+      "acc_norm,none": 0.21245733788395904,
+      "acc_norm_stderr,none": 0.011953482906582826
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.31607744107744107,
+      "acc_stderr,none": 0.009540440071928223,
+      "acc_norm,none": 0.30808080808080807,
+      "acc_norm_stderr,none": 0.009473887075826332
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27086237801234814,
+      "acc_stderr,none": 0.004434969257446433,
+      "acc_norm,none": 0.2747460665206134,
+      "acc_norm_stderr,none": 0.004454739415704683
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 751.2788397191845,
+      "perplexity_stderr,none": 30.655472135152717,
+      "acc,none": 0.06928003104987386,
+      "acc_stderr,none": 0.0035377376669827655
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.122,
+      "acc_stderr,none": 0.01465132494504475,
+      "acc_norm,none": 0.262,
+      "acc_norm_stderr,none": 0.019684688820194637
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5484221980413493,
+      "acc_stderr,none": 0.011610989358814248,
+      "acc_norm,none": 0.543525571273123,
+      "acc_norm_stderr,none": 0.011621538875661558
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.4972375690607735,
+      "acc_stderr,none": 0.014052271211616401
+    }
+  }
+}

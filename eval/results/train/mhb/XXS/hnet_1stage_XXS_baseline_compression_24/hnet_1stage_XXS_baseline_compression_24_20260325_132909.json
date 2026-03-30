@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_baseline_compression_24/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_baseline_compression_24.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132909",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17064846416382254,
+      "acc_stderr,none": 0.010993654168413736,
+      "acc_norm,none": 0.20051194539249148,
+      "acc_norm_stderr,none": 0.011700318050499469
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.30513468013468015,
+      "acc_stderr,none": 0.009448531094163992,
+      "acc_norm,none": 0.30134680134680136,
+      "acc_norm_stderr,none": 0.009415259879351578
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27504481179047996,
+      "acc_stderr,none": 0.004456242601950599,
+      "acc_norm,none": 0.2826130252937662,
+      "acc_norm_stderr,none": 0.004493495872000464
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 608.7786043426693,
+      "perplexity_stderr,none": 24.48854540814949,
+      "acc,none": 0.07917717834271298,
+      "acc_stderr,none": 0.003761838269856341
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.132,
+      "acc_stderr,none": 0.015152927850580223,
+      "acc_norm,none": 0.256,
+      "acc_norm_stderr,none": 0.019536923574747664
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5549510337323177,
+      "acc_stderr,none": 0.011595157509775814,
+      "acc_norm,none": 0.543525571273123,
+      "acc_norm_stderr,none": 0.011621538875661558
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.4996053670086819,
+      "acc_stderr,none": 0.01405248130604961
+    }
+  }
+}

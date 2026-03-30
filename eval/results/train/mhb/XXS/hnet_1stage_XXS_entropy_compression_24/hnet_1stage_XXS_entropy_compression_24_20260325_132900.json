@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_entropy_compression_24/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_entropy_compression_24.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132900",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17320819112627986,
+      "acc_stderr,none": 0.011058694183280343,
+      "acc_norm,none": 0.2158703071672355,
+      "acc_norm_stderr,none": 0.012022975360030762
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.2962962962962963,
+      "acc_stderr,none": 0.009369711585684086,
+      "acc_norm,none": 0.30976430976430974,
+      "acc_norm_stderr,none": 0.009488172851903585
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27594104760007965,
+      "acc_stderr,none": 0.004460737165882605,
+      "acc_norm,none": 0.28201553475403307,
+      "acc_norm_stderr,none": 0.004490612245335525
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 834.0254031125614,
+      "perplexity_stderr,none": 33.49385902826048,
+      "acc,none": 0.07083252474286823,
+      "acc_stderr,none": 0.0035741718783459052
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.134,
+      "acc_stderr,none": 0.01524969200385453,
+      "acc_norm,none": 0.272,
+      "acc_norm_stderr,none": 0.019920483209566107
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5620239390642002,
+      "acc_stderr,none": 0.011575720065593988,
+      "acc_norm,none": 0.5380848748639826,
+      "acc_norm_stderr,none": 0.011631933367846934
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5074980268350434,
+      "acc_stderr,none": 0.014050905521228646
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_baseline_compression_12/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_baseline_compression_12.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132903",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.16552901023890784,
+      "acc_stderr,none": 0.010860860440277736,
+      "acc_norm,none": 0.2158703071672355,
+      "acc_norm_stderr,none": 0.012022975360030762
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.30345117845117847,
+      "acc_stderr,none": 0.009433837434252456,
+      "acc_norm,none": 0.3042929292929293,
+      "acc_norm_stderr,none": 0.009441202922359051
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.27723561043616807,
+      "acc_stderr,none": 0.004467189716140269,
+      "acc_norm,none": 0.28450507866958774,
+      "acc_norm_stderr,none": 0.004502563079349086
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 759.9544441794459,
+      "perplexity_stderr,none": 30.199868581198366,
+      "acc,none": 0.06869784591500097,
+      "acc_stderr,none": 0.0035239434972850242
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.118,
+      "acc_stderr,none": 0.014441922942480794,
+      "acc_norm,none": 0.266,
+      "acc_norm_stderr,none": 0.019780559675655396
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5560391730141458,
+      "acc_stderr,none": 0.011592322161277677,
+      "acc_norm,none": 0.544069640914037,
+      "acc_norm_stderr,none": 0.011620422647622046
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.4925019731649566,
+      "acc_stderr,none": 0.014050905521228646
+    }
+  }
+}

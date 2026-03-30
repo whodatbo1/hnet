@@ -1,0 +1,66 @@
+{
+  "model_path": "/projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XXS/hnet_1stage_XXS_bm_head_cos_routing/latest.pt",
+  "config_path": "configs/mhb/XXS/hnet_1stage_XXS_bm_head_cos_routing.json",
+  "tasks": [
+    "lambada_openai",
+    "hellaswag",
+    "piqa",
+    "arc_easy",
+    "arc_challenge",
+    "winogrande",
+    "openbookqa"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 4,
+  "max_length": 8192,
+  "timestamp": "20260325_132907",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.1697952218430034,
+      "acc_stderr,none": 0.010971775157784207,
+      "acc_norm,none": 0.2022184300341297,
+      "acc_norm_stderr,none": 0.011737454431872123
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.30303030303030304,
+      "acc_stderr,none": 0.009430140669278778,
+      "acc_norm,none": 0.3143939393939394,
+      "acc_norm_stderr,none": 0.00952670242316272
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.2748456482772356,
+      "acc_stderr,none": 0.004455240755811293,
+      "acc_norm,none": 0.28739294961163114,
+      "acc_norm_stderr,none": 0.004516215206714907
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 716.2828997642652,
+      "perplexity_stderr,none": 28.764866633321468,
+      "acc,none": 0.08208810401707743,
+      "acc_stderr,none": 0.003824306436429032
+    },
+    "openbookqa": {
+      "alias": "openbookqa",
+      "acc,none": 0.142,
+      "acc_stderr,none": 0.01562563024781025,
+      "acc_norm,none": 0.278,
+      "acc_norm_stderr,none": 0.020055833888070865
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5478781284004353,
+      "acc_stderr,none": 0.011612217507379409,
+      "acc_norm,none": 0.5397170837867247,
+      "acc_norm_stderr,none": 0.011628961491718543
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.4988161010260458,
+      "acc_stderr,none": 0.014052446290528871
+    }
+  }
+}

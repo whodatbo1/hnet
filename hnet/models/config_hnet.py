@@ -33,6 +33,7 @@ class RoutingConfig:
     identity_routing: bool = False
     entropy_routing: bool = False
     byte_vocab_size: int = 256
+    learn_entropy_thresholds: bool = True
     single_projection: bool = False
     bm_head_cos_routing: bool = False
 

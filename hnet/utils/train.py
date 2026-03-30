@@ -10,6 +10,37 @@ from hnet.modules.dc import RoutingModuleOutput
 from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.modules.utils import apply_optimization_params
 
+
+def get_compression_ratio(step: int, max_steps: int, schedule: list) -> float:
+    """Return the current compression ratio by piecewise-linear interpolation.
+
+    Args:
+        step:      Current training step (0-indexed).
+        max_steps: Total number of training steps.
+        schedule:  List of [fraction, ratio] waypoints, e.g.
+                   [[0.0, 2], [0.15, 2], [0.30, 4], [0.45, 4], [0.60, 6], [1.0, 6]]
+                   Fractions must be in [0, 1] and strictly non-decreasing.
+
+    Returns:
+        The interpolated compression ratio as a float.
+    """
+    frac = step / max(max_steps, 1)
+    # Clamp to the defined range
+    if frac <= schedule[0][0]:
+        return float(schedule[0][1])
+    if frac >= schedule[-1][0]:
+        return float(schedule[-1][1])
+    # Find the bracketing waypoints and interpolate
+    for i in range(len(schedule) - 1):
+        f0, r0 = schedule[i]
+        f1, r1 = schedule[i + 1]
+        if f0 <= frac <= f1:
+            if f1 == f0:
+                return float(r1)
+            t = (frac - f0) / (f1 - f0)
+            return float(r0 + t * (r1 - r0))
+    return float(schedule[-1][1])
+
 def load_balancing_loss(
     router_output: RoutingModuleOutput,
     N: float,
@@ -38,6 +69,23 @@ def load_balancing_loss(
         (1 - true_ratio) * (1 - average_prob) +
         (true_ratio) * (average_prob) * (N-1)
     ) * N / (N-1)
+
+def certainty_loss(router_output: RoutingModuleOutput) -> torch.Tensor:
+    """
+    Compute the binary entropy (certainty) loss over boundary probabilities.
+
+    Minimising this encourages the router to make confident (near-0 or near-1)
+    boundary decisions without imposing a target compression ratio.
+
+    Args:
+        router_output: The output of the routing module.
+
+    Returns:
+        A scalar tensor: mean binary entropy H_b(p_t) over all positions.
+    """
+    p = router_output.boundary_prob[..., 1].float().clamp(1e-7, 1 - 1e-7)
+    return -(p * p.log() + (1 - p) * (1 - p).log()).mean()
+
 
 # Keeping the effective rank of BP matrices high
 def orthogonality_regularization_soft(W):
