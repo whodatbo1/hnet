@@ -86,9 +86,16 @@ def create_dataloaders(data_dir, data_subset, seq_len, seed, val_batches, batch_
     For the Chinese dataset use data_subset="chinese-<score_range>", e.g. "chinese-3_4",
     which resolves to <data_dir>/fineweb-edu-chinese-3_4/{train,val}.bin.
 
+    For The Stack V2 Smol use data_subset="the-stack-v2-smol",
+    which resolves to <data_dir>/the-stack-v2-smol/{train,val}.bin.
+
     Run scripts/prepare_data.py once to generate them.
     """
-    subset_dir = data_dir / f"fineweb-edu-{data_subset}"
+    # Datasets that don't use the fineweb-edu- prefix
+    if data_subset.startswith(("the-stack-v2-smol", "starcoderdata")):
+        subset_dir = data_dir / data_subset
+    else:
+        subset_dir = data_dir / f"fineweb-edu-{data_subset}"
 
     train_bin = subset_dir / "train.bin"
     val_bin = subset_dir / "val.bin"

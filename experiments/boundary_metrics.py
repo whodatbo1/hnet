@@ -32,13 +32,11 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-import numpy as np
 from omegaconf import ListConfig
 
 from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetConfig
 from hnet.utils.data import MemmapByteDataset
-from hnet.utils.eval import compression_metrics
 from torch.utils.data import DataLoader
 
 

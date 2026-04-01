@@ -21,7 +21,8 @@ dependencies = [
     "omegaconf",
     "datasets",
     "lm-eval",
-    "matplotlib"
+    "matplotlib",
+    "boto3"
 ]
 [project.urls]
 Repository = "https://github.com/goombalab/hnet"
