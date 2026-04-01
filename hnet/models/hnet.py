@@ -225,6 +225,7 @@ class HNet(nn.Module):
         mask=None,
         inference_params=None,
         targets=None,
+        input_ids=None,
         **mixer_kwargs,
     ):
         assert mask is not None or (
@@ -283,13 +284,27 @@ class HNet(nn.Module):
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
         )
 
+        # Derive inner-stage targets for entropy routing at deeper stages.
+        # Each inner position k corresponds to patch k; its target is the first
+        # byte of patch k+1, i.e. input_ids at the next boundary position.
+        if input_ids is not None and cu_seqlens is not None:
+            inner_input_ids = input_ids[bpred_output.boundary_mask]  # (num_patches,)
+            inner_targets = torch.roll(inner_input_ids, -1)
+            # The last patch of each sequence has no next patch — mark as ignore.
+            last_positions = next_cu_seqlens[1:] - 1
+            inner_targets[last_positions] = -100
+        else:
+            inner_input_ids = None
+            inner_targets = targets  # backward compat (padded mode / no input_ids)
+
         hidden_states, prev_boundary_predictions = self.main_network(
             hidden_states,
             cu_seqlens=next_cu_seqlens,
             max_seqlen=next_max_seqlen,
             mask=next_mask,
             inference_params=inference_params.main_network_state,
-            targets=targets,
+            targets=inner_targets,
+            input_ids=inner_input_ids,
             **mixer_kwargs,
         )
 

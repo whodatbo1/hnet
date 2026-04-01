@@ -89,10 +89,13 @@ def create_dataloaders(data_dir, data_subset, seq_len, seed, val_batches, batch_
     For The Stack V2 Smol use data_subset="the-stack-v2-smol",
     which resolves to <data_dir>/the-stack-v2-smol/{train,val}.bin.
 
+    For FineWeb-2 use data_subset="fineweb-2-<lang>", e.g. "fineweb-2-kor_Hang",
+    which resolves to <data_dir>/fineweb-2-kor_Hang/{train,val}.bin.
+
     Run scripts/prepare_data.py once to generate them.
     """
     # Datasets that don't use the fineweb-edu- prefix
-    if data_subset.startswith(("the-stack-v2-smol", "starcoderdata")):
+    if data_subset.startswith(("the-stack-v2-smol", "starcoderdata", "fineweb-2")):
         subset_dir = data_dir / data_subset
     else:
         subset_dir = data_dir / f"fineweb-edu-{data_subset}"

@@ -225,6 +225,7 @@ class RoutingModule(nn.Module):
                 bm_loss = nn.functional.cross_entropy(
                     bm_logits.reshape(-1, bm_logits.size(-1)),
                     targets.reshape(-1),
+                    ignore_index=-100,
                 )
         elif self.bm_head_cos_routing:
             bm_logits = self.bm_head(hidden_states)  # (B, T, vocab_size)
@@ -234,6 +235,7 @@ class RoutingModule(nn.Module):
                 bm_loss = nn.functional.cross_entropy(
                     bm_logits.reshape(-1, bm_logits.size(-1)),
                     targets.reshape(-1),
+                    ignore_index=-100,
                 )
             cos_sim = torch.einsum(
                 "b l d, b l d -> b l",

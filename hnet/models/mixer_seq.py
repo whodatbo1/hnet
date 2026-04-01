@@ -107,9 +107,11 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                 inference_params is None
             ), "Inference params are not supported in packed mode"
             hidden_states = hidden_states.flatten(0, 1)
+            input_ids_flat = input_ids.reshape(-1)  # (B*L,) for inner-stage targets
             cu_seqlens = torch.arange(B + 1, device=hidden_states.device) * L
             max_seqlen = torch.tensor(L, dtype=torch.int, device=hidden_states.device)
         else:
+            input_ids_flat = input_ids
             cu_seqlens = None
             max_seqlen = None
 
@@ -120,6 +122,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
             mask=mask,
             inference_params=inference_params,
             targets=targets,
+            input_ids=input_ids_flat,
             **mixer_kwargs,
         )
 
