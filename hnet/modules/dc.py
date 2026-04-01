@@ -65,9 +65,6 @@ class RoutingModule(nn.Module):
 
         self.compression_ratio = routing_cfg.compression_ratio
 
-        self.coding_rate = routing_cfg.coding_rate
-        self.coding_rate_epsilon = routing_cfg.coding_rate_epsilon
-
         self.identity_routing = routing_cfg.identity_routing
 
         self.single_projection = routing_cfg.single_projection
@@ -93,9 +90,6 @@ class RoutingModule(nn.Module):
 
         self.q_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
         self.k_proj_layer = nn.Linear(d_model, self.d_similarity, bias=False, **factory_kwargs)
-
-        if self.coding_rate:
-            self.cr_proj = nn.Linear(self.d_model, self.d_similarity, bias=False, **factory_kwargs)
 
         # Byte-modelling Head
         if self.entropy_routing:
@@ -186,25 +180,6 @@ class RoutingModule(nn.Module):
             boundary_indices = torch.multinomial(weights, num_samples=num_boundaries, replacement=False)
             cos_sim = torch.ones(B, T - 1, device=hidden_states.device)
             cos_sim.scatter_(1, boundary_indices, -1.0)
-        elif self.coding_rate:
-            B, T, D = hidden_states.shape
-
-            I = torch.eye(self.d_similarity, device=hidden_states.device)
-
-            hs_proj = self.cr_proj(hidden_states)
-
-            outers = torch.einsum('bti,btj -> btij', hs_proj, hs_proj)
-            S_cum = torch.cumsum(outers, dim=1)
-            
-            crs = I + ((self.d_similarity / self.coding_rate_epsilon ** 2) * S_cum)
-
-            _, logdet = torch.linalg.slogdet(crs)
-
-            R = 0.5 * logdet
-
-            delta_R = R[:, 1:] - R[:, :-1]
-            
-            cos_sim = delta_R
         elif self.multiheaded:
             B, T, D = hidden_states.shape
 
@@ -242,12 +217,10 @@ class RoutingModule(nn.Module):
                 prev_entropy_std = self.entropy_std.detach()
 
             entropy_signal = (entropies - prev_entropy_mean) / (prev_entropy_std + 1e-6)
-            # print(f'entropy_signal: {entropy_signal[0, :20]}')
 
             temperature = self.log_temperature.exp()
             boundary_prob = torch.sigmoid((entropy_signal - self.entropy_threshold) / temperature)
 
-            # print(f'boundary_prob: {boundary_prob[0, :20]}')
             if targets is not None:
                 bm_loss = nn.functional.cross_entropy(
                     bm_logits.reshape(-1, bm_logits.size(-1)),
@@ -268,6 +241,7 @@ class RoutingModule(nn.Module):
                 F.normalize(self.k_proj_layer(hidden_states[:, 1:]), dim=-1),
             )
         else:
+            # Default cos-sim
             cos_sim = torch.einsum(
                 "b l d, b l d -> b l",
                 F.normalize(self.q_proj_layer(hidden_states[:, :-1]), dim=-1),
@@ -330,7 +304,6 @@ class RoutingModule(nn.Module):
 
     def step(self, hidden_states, inference_params):
         assert self.multiheaded is False, "step() not implemented for Multiheaded BP"
-        assert self.coding_rate is False, "step() not implemented for Coding Rate BP"
         
         # hidden_states is (B, 1, D)
         hidden_states = hidden_states.squeeze(1)  # (B, D)
@@ -362,7 +335,6 @@ class RoutingModule(nn.Module):
                 torch.full((B,), -1.0, device=hidden_states.device),
                 torch.ones(B, device=hidden_states.device),
             )
-        # coding_rate: not implemented for step
         # multiheaded: not implemented for step (requires hidden-state window)
         elif self.entropy_routing:
             bm_logits = self.bm_head(hidden_states)  # (B, vocab_size)

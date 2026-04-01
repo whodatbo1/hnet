@@ -283,9 +283,6 @@ class HNet(nn.Module):
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
         )
 
-        # if self.contrastive_loss:
-            
-
         hidden_states, prev_boundary_predictions = self.main_network(
             hidden_states,
             cu_seqlens=next_cu_seqlens,
