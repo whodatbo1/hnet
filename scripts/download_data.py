@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download FineWeb-Edu (English), FineWeb-Edu-Chinese, or The Stack V2 Smol from HuggingFace.
+Download FineWeb-Edu (English), FineWeb-Edu-Chinese, FineWeb-2, or The Stack V2 Smol from HuggingFace.
 
 Usage:
     # English (default)
@@ -10,6 +10,10 @@ Usage:
     # Chinese
     python download_data.py --dataset fineweb-edu-chinese --subset 3_4
     python download_data.py --dataset fineweb-edu-chinese --subset 4_5
+
+    # FineWeb-2 (any language — see https://huggingface.co/datasets/HuggingFaceFW/fineweb-2)
+    python download_data.py --dataset fineweb-2 --subset kor_Hang     # Korean (~98 GB)
+    python download_data.py --dataset fineweb-2 --subset arb_Arab     # Arabic
 
     # Code (The Stack V2 Smol) — requires AWS credentials for SWH S3 access
     python download_data.py --dataset the-stack-v2-smol
@@ -90,6 +94,40 @@ def download_fineweb_edu_chinese(output_dir: str, score_range: str = "3_4"):
         repo_type="dataset",
         local_dir=str(local_dir),
         allow_patterns=[f"{score_range}/*"],
+    )
+
+    print(f"Successfully downloaded to: {model_path}")
+    return model_path
+
+
+def download_fineweb_2(output_dir: str, subset: str = "kor_Hang"):
+    """Download a FineWeb-2 language subset from HuggingFace.
+
+    FineWeb-2 covers 1000+ languages with subsets named by BCP-47 style codes
+    (e.g. kor_Hang, arb_Arab, fra_Latn). See the full list at:
+    https://huggingface.co/datasets/HuggingFaceFW/fineweb-2#languages-and-available-subsets
+
+    Downloaded data lands at:
+        <output_dir>/fineweb-2-<subset>/data/<subset>/train/
+        <output_dir>/fineweb-2-<subset>/data/<subset>/test/
+
+    Args:
+        output_dir: Root directory to save the dataset.
+        subset: Language config name (e.g. "kor_Hang").
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    repo_id = "HuggingFaceFW/fineweb-2"
+    local_dir = output_path / f"fineweb-2-{subset}"
+
+    print(f"Downloading {repo_id} ({subset}) to {local_dir.absolute()}...")
+
+    model_path = snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        local_dir=str(local_dir),
+        allow_patterns=[f"data/{subset}/*"],
     )
 
     print(f"Successfully downloaded to: {model_path}")
@@ -271,13 +309,13 @@ def download_the_stack_v2_smol(output_dir: str, num_workers: int = 32,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Download FineWeb-Edu (English/Chinese) or The Stack V2 Smol from HuggingFace"
+        description="Download FineWeb-Edu (English/Chinese), FineWeb-2, or The Stack V2 Smol from HuggingFace"
     )
     parser.add_argument(
         "--dataset",
         type=str,
         default="fineweb-edu",
-        choices=["fineweb-edu", "fineweb-edu-chinese", "the-stack-v2-smol", "starcoderdata"],
+        choices=["fineweb-edu", "fineweb-edu-chinese", "fineweb-2", "the-stack-v2-smol", "starcoderdata"],
         help="Which dataset to download (default: fineweb-edu)",
     )
     parser.add_argument(
@@ -294,6 +332,7 @@ if __name__ == "__main__":
             "Subset to download. "
             "For fineweb-edu: e.g. 'sample-10BT' (default). "
             "For fineweb-edu-chinese: score range '2_3', '3_4', or '4_5' (default: '3_4'). "
+            "For fineweb-2: language code, e.g. 'kor_Hang' (default). "
             "For starcoderdata: language, e.g. 'python' (default: all). "
             "Not used for the-stack-v2-smol (downloads all languages)."
         ),
@@ -316,6 +355,9 @@ if __name__ == "__main__":
     if args.dataset == "fineweb-edu-chinese":
         score_range = args.subset if args.subset is not None else "3_4"
         download_fineweb_edu_chinese(args.output_dir, score_range)
+    elif args.dataset == "fineweb-2":
+        subset = args.subset if args.subset is not None else "kor_Hang"
+        download_fineweb_2(args.output_dir, subset)
     elif args.dataset == "starcoderdata":
         download_starcoderdata(args.output_dir, subset=args.subset)
     elif args.dataset == "the-stack-v2-smol":
