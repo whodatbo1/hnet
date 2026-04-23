@@ -94,15 +94,18 @@ class RoutingModule(nn.Module):
         # Byte-modelling Head
         if self.entropy_routing:
             self.bm_head = nn.Linear(self.d_model, self.byte_vocab_size, bias=False, **factory_kwargs)
-            if routing_cfg.learn_entropy_thresholds:
-                self.log_temperature = nn.Parameter(torch.tensor(0.0))
+            if routing_cfg.learn_entropy_threshold:
                 self.entropy_threshold = nn.Parameter(torch.tensor(1.0))
             else:
-                self.log_temperature = torch.tensor(0.0)
                 self.entropy_threshold = torch.tensor(1.0)
-            
-            self.register_buffer('entropy_mean', torch.tensor(0.0))
-            self.register_buffer('entropy_std', torch.tensor(0.0))
+            if routing_cfg.learn_entropy_temperature:
+                self.log_temperature = nn.Parameter(torch.tensor(0.0))
+            else:
+                self.log_temperature = torch.tensor(0.0)
+                                
+            # Staring values correspond to MAXIMUM achievable entropy + some non-zero std
+            self.register_buffer('entropy_mean', torch.tensor(8.0))
+            self.register_buffer('entropy_std', torch.tensor(0.5))
             with torch.no_grad():
                 nn.init.normal_(self.bm_head.weight, mean=0.0, std=0.02)
         
@@ -545,7 +548,7 @@ class DeChunkLayer(nn.Module):
         p = torch.zeros(B, device=hidden_states.device, dtype=hidden_states.dtype)
         p[boundary_mask] = boundary_prob[boundary_mask, -1].clamp(
             min=1e-4, max=1 - (1e-4)
-        )
+        ).to(p.dtype)
 
         current_hidden_states = torch.zeros(
             B, D, device=hidden_states.device, dtype=hidden_states.dtype
