@@ -401,7 +401,7 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
 # ---------------------------------------------------------------------------
 
 def main():
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     cfg = load_config()
 
     # ---- Distributed setup ----
