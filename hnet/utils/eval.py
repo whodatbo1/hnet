@@ -35,6 +35,7 @@ def compression_metrics(bpred_outputs: list) -> dict:
         Dict with per-stage and averaged metrics:
         - F (fraction selected): proportion of vectors retained after downsampling
         - G (avg boundary prob): mean boundary probability across positions
+        - Variance and percentiles (p50, p75, p90, p99) for both F and G
     """
     if not bpred_outputs:
         return {}
@@ -49,17 +50,49 @@ def compression_metrics(bpred_outputs: list) -> dict:
     for i, router_out in enumerate(bpred_outputs):
         boundary_mask = router_out.boundary_mask
         bp = router_out.boundary_prob[..., -1].float()
+        f_vals = boundary_mask.float()
 
-        f_selected = boundary_mask.float().mean().item()
+        f_selected = f_vals.mean().item()
         g_avg_prob = bp.mean().item()
 
-        pos_mask = boundary_mask.float()
+        pos_mask = f_vals
         neg_mask = (~boundary_mask).float()
         g_pos = (bp * pos_mask).sum() / pos_mask.sum().clamp(min=1)
         g_neg = (bp * neg_mask).sum() / neg_mask.sum().clamp(min=1)
 
+        # Flatten for percentile computation
+        bp_flat = bp.flatten()
+        f_flat = f_vals.flatten()
+
+        # G distribution stats
+        g_var = bp_flat.var().item()
+        g_p50, g_p75, g_p90, g_p99 = torch.quantile(
+            bp_flat, torch.tensor([0.5, 0.75, 0.9, 0.99], device=bp_flat.device)
+        ).tolist()
+
+        # F distribution stats (per-sequence compression ratios)
+        # Reshape to per-sequence if possible, otherwise use flat
+        if boundary_mask.dim() >= 2:
+            f_per_seq = f_vals.mean(dim=-1)  # (B,) or (B, ...) -> fraction per sequence
+        else:
+            f_per_seq = f_flat
+        f_var = f_per_seq.var().item()
+        f_p50, f_p75, f_p90, f_p99 = torch.quantile(
+            f_per_seq, torch.tensor([0.5, 0.75, 0.9, 0.99], device=f_per_seq.device)
+        ).tolist()
+
         metrics[f"stage_{i}/F_selected"] = f_selected
+        metrics[f"stage_{i}/F_var"] = f_var
+        metrics[f"stage_{i}/F_p50"] = f_p50
+        metrics[f"stage_{i}/F_p75"] = f_p75
+        metrics[f"stage_{i}/F_p90"] = f_p90
+        metrics[f"stage_{i}/F_p99"] = f_p99
         metrics[f"stage_{i}/G_avg_boundary_prob"] = g_avg_prob
+        metrics[f"stage_{i}/G_var"] = g_var
+        metrics[f"stage_{i}/G_p50"] = g_p50
+        metrics[f"stage_{i}/G_p75"] = g_p75
+        metrics[f"stage_{i}/G_p90"] = g_p90
+        metrics[f"stage_{i}/G_p99"] = g_p99
         metrics[f"stage_{i}/G_boundary_prob_pos"] = g_pos.item()
         metrics[f"stage_{i}/G_boundary_prob_neg"] = g_neg.item()
         all_f.append(f_selected)
