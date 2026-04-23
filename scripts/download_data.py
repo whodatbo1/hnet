@@ -322,7 +322,7 @@ if __name__ == "__main__":
         "--output-dir",
         type=str,
         default="/projects/0/hpmlprjs/interns/marko/hnet/data/",
-        help="Directory to save dataset (default: /scratch-shared/mivanov1/hnet/data)",
+        help="Directory to save dataset (default: /projects/0/hpmlprjs/interns/marko/hnet/data/)",
     )
     parser.add_argument(
         "--subset",

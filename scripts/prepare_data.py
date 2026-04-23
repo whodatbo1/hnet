@@ -184,7 +184,7 @@ def prepare(data_dir: str, subset: str, val_fraction: float, seed: int, num_work
     # expensive Arrow save_to_disk step.  Instead, compute shuffled train/val
     # index arrays (cheap — just ints) and have each worker read directly from
     # the parquet-backed HF dataset.
-    use_fast_path = dataset in ("starcoderdata", "the-stack-v2-smol", "fineweb-edu-chinese", "fineweb-2")
+    use_fast_path = dataset in ("starcoderdata", "the-stack-v2-smol", "fineweb-edu-chinese", "fineweb-2", "fineweb-edu")
 
     if use_fast_path:
         _prepare_fast(parquet_dir, output_dir, tmp_dir, text_column,
