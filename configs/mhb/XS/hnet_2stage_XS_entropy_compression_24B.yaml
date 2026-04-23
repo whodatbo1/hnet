@@ -1,0 +1,65 @@
+# HNet Training Configuration
+# Override any field via CLI: python train.py --config configs/train/default.yaml --lr 1e-3
+
+# --- Model ---
+model_config: configs/mhb/XS/hnet_2stage_XS_entropy_compression_24B.json
+
+# Per-stage LR multipliers (outer to inner). Set to null to disable.
+# Example for 2-stage: [3.0, 1.7, 0.9]
+lr_multiplier: null
+
+# --- Optimizer ---
+lr: 6.25e-4
+weight_decay: 0.1
+betas: [0.9, 0.95]
+max_grad_norm: 1.0
+
+# --- LR Schedule (Warmup-Stable-Decay) ---
+warmup_fraction: 0.1   # 10% linear warmup
+decay_fraction: 0.2     # 20% inverse-sqrt decay
+
+# --- Loss ---
+alpha: 0.03                  # Load balancing loss weight
+ortho_reg_lambda: 0.0     # Orthogonal regularization of BP matrices loss weight
+downsample_n: 3              # Expected downsampling factor N
+bm_loss_weight: 0.1          # Byte-modelling loss of encoder used for entropy routing
+cert_loss_weight: 0.0      # Pushes positive boundaries to probabilty 1 and negative ones to probability 0
+
+# --- Data ---
+data_dir: /projects/0/hpmlprjs/interns/marko/hnet/data  # Local data root (download with download_data.py)
+dataset_config: sample-10BT  # Dataset subset name
+seq_len: 8192
+seed: 42
+
+# --- Batch ---
+batch_size: 16           # Micro batch size per GPU
+grad_accum_steps: 16      # Gradient accumulation steps
+num_workers: 8           # Dataloader workers (can use >0 with local data)
+
+# --- Training ---
+max_steps: null
+total_tokens: 24_000_000_000
+
+# --- Validation ---
+validate_every: 100       # Run validation every N steps (0 to disable)
+val_fraction: 0.005       # Fraction of streaming documents reserved for validation (0.5%)
+val_batches: 128          # Number of micro-batches per validation run
+
+# --- Checkpointing ---
+checkpoint_dir: /projects/0/hpmlprjs/interns/marko/hnet/checkpoints/train/mhb/XS/hnet_2stage_XS_entropy_compression_24B
+save_every: 250
+resume: true
+
+# --- Logging ---
+log_every: 10
+wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
+wandb_run_name: "train_hnet_2stage_XS_entropy_compression_24B"
+
+# --- Memory ---
+activation_checkpointing: false
+
+# --- Compile ---
+compile: false
+
+# --- Entropy Routing ---
+entropy_decay: 0.1

@@ -27,7 +27,7 @@ bm_loss_weight: 0.1          # Byte-modelling loss of encoder used for entropy r
 compression_schedule: [[0.0, 2], [0.15, 2], [0.30, 4], [0.45, 4], [0.60, 6], [1.0, 6]]
 
 # --- Data ---
-data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with download_data.py)
+data_dir: /projects/0/hpmlprjs/interns/marko/hnet/data/  # Local data root (download with download_data.py)
 dataset_config: sample-10BT  # Dataset subset name
 seq_len: 8192
 seed: 42

@@ -25,7 +25,7 @@ downsample_n: 12              # Expected downsampling factor N
 bm_loss_weight: 0.0          # Byte-modelling loss of encoder used for entropy routing
 
 # --- Data ---
-data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with download_data.py)
+data_dir: /projects/0/hpmlprjs/interns/marko/hnet/data/  # Local data root (download with download_data.py)
 dataset_config: sample-10BT  # Dataset subset name
 seq_len: 8192
 seed: 42

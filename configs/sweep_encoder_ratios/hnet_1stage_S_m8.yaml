@@ -23,7 +23,7 @@ alpha: 0.03             # Load balancing loss weight
 downsample_n: 6       # Expected downsampling factor N
 
 # --- Data ---
-data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with download_data.py)
+data_dir: /projects/0/hpmlprjs/interns/marko/hnet/data/  # Local data root (download with download_data.py)
 dataset_config: sample-10BT  # Dataset subset name
 seq_len: 8192
 seed: 42
