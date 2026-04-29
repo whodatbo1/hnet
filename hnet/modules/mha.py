@@ -216,6 +216,7 @@ class CausalMHA(nn.Module):
         self.softmax_scale = softmax_scale
         self.rotary_emb_dim = rotary_emb_dim
         self.window_size = window_size
+        self.use_flash_attn = True
 
         self.num_heads = num_heads
         assert self.d_model % num_heads == 0, "d_model must be divisible by num_heads"

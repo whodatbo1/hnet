@@ -217,9 +217,12 @@ class HNetLM(TemplateLM):
             until = gen_kwargs.get("until", [])
             max_gen_toks = gen_kwargs.get("max_gen_toks", self.max_gen_toks)
 
-            context_ids = self.tok_encode(context)
+            # HNet dynamic chunking requires the first prefill token to be a
+            # boundary — BOS is what guarantees that (see generate.py).
+            context_ids = self.tok_encode(context, add_special_tokens=True)
             if len(context_ids) > self._max_length:
-                context_ids = context_ids[-self._max_length:]
+                # Keep BOS at position 0 when truncating from the left
+                context_ids = [context_ids[0]] + context_ids[-(self._max_length - 1):]
 
             input_ids = torch.tensor(
                 [context_ids], dtype=torch.long, device=self._device

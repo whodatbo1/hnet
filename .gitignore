@@ -195,5 +195,8 @@ cython_debug/
 
 checkpoints/
 wandb/
+viz_entropy/
+eval/results
+jobs/
 
 .vscode/
