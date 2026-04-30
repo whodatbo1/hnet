@@ -1,0 +1,49 @@
+include: _olmes_base_cf.yaml
+task: olmes_openbookqa_cf
+dataset_path: allenai/openbookqa
+dataset_name: main
+test_split: test
+doc_to_text: "Question: {{question_stem}}\nAnswer:"
+doc_to_target: "{{choices.label.index(answerKey.strip())}}"
+doc_to_choice: "{{choices.text}}"
+fewshot_config:
+  sampler: first_n
+  samples:
+    - id: "7-584"
+      question_stem: "When standing miles away from Mount Rushmore"
+      choices:
+        text:
+          - "the mountains seem very close"
+          - "the mountains are boring"
+          - "the mountains look the same as from up close"
+          - "the mountains seem smaller than in photographs"
+        label: ["A", "B", "C", "D"]
+      answerKey: "D"
+    - id: "7-870"
+      question_stem: "When food is reduced in the stomach"
+      choices:
+        text:
+          - "the mind needs time to digest"
+          - "take a second to digest what I said"
+          - "nutrients are being deconstructed"
+          - "reader's digest is a body of works"
+        label: ["A", "B", "C", "D"]
+      answerKey: "C"
+    - id: "9-732"
+      question_stem: "You can make a telescope with a"
+      choices:
+        text: ["straw", "Glass", "Candle", "mailing tube"]
+        label: ["A", "B", "C", "D"]
+      answerKey: "D"
+    - id: "9-782"
+      question_stem: "Poison causes harm to which of the following?"
+      choices:
+        text: ["a Tree", "a robot", "a house", "a car"]
+        label: ["A", "B", "C", "D"]
+      answerKey: "A"
+    - id: "8-72"
+      question_stem: "What happens when mercury is placed in water?"
+      choices:
+        text: ["it dissolves", "it sinks", "it floats", "it hardens"]
+        label: ["A", "B", "C", "D"]
+      answerKey: "B"

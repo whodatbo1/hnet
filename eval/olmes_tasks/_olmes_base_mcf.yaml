@@ -1,0 +1,11 @@
+# OLMES multiple-choice formulation (MCF) base.
+# Choices are letters ("A","B","C","D",...) so length-normalized metrics are
+# degenerate; report only `acc`.
+output_type: multiple_choice
+target_delimiter: " "
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 0.1

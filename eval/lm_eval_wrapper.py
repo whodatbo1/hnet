@@ -112,12 +112,16 @@ class HNetLM(TemplateLM):
             batch_cont_lens = []
 
             for orig_idx, (_, ctx_ids, cont_ids) in sorted_requests[i : i + batch_size]:
-                full_ids = ctx_ids + cont_ids
-                # Truncate from the left if too long
+                # Match training distribution: every doc starts with BOS during
+                # pretraining (scripts/prepare_data.py:104). Without this prefix,
+                # loglikelihood scoring is off-distribution.
+                bos = self.tokenizer.bos_idx
+                full_ids = [bos] + ctx_ids + cont_ids
+                # Truncate from the left if too long, preserving BOS at index 0.
                 if len(full_ids) > self._max_length:
-                    full_ids = full_ids[-self._max_length:]
+                    full_ids = [bos] + full_ids[-(self._max_length - 1):]
                     # Adjust cont_len if context was fully truncated
-                    cont_len = min(len(cont_ids), len(full_ids))
+                    cont_len = min(len(cont_ids), len(full_ids) - 1)
                 else:
                     cont_len = len(cont_ids)
 

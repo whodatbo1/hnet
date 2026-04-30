@@ -1,0 +1,49 @@
+include: _olmes_base_mcf.yaml
+task: olmes_arc_easy_mcf
+dataset_path: allenai/ai2_arc
+dataset_name: ARC-Easy
+test_split: test
+doc_to_text: !function _olmes_utils.arc_mcf_doc_to_text
+doc_to_choice: !function _olmes_utils.arc_mcf_doc_to_choice
+doc_to_target: !function _olmes_utils.arc_mcf_doc_to_target
+fewshot_config:
+  sampler: first_n
+  samples:
+    - id: MCAS_2007_8_5189
+      question: "Lichens are symbiotic organisms made of green algae and fungi. What do the green algae supply to the fungi in this symbiotic relationship?"
+      choices:
+        text: ["carbon dioxide", "food", "protection", "water"]
+        label: ["A", "B", "C", "D"]
+      answerKey: "B"
+    - id: Mercury_SC_401169
+      question: "When a switch is used in an electrical circuit, the switch can"
+      choices:
+        text:
+          - "cause the charge to build."
+          - "increase and decrease the voltage."
+          - "cause the current to change direction."
+          - "stop and start the flow of current."
+        label: ["A", "B", "C", "D"]
+      answerKey: "D"
+    - id: MCAS_2004_8_27
+      question: "Which of the following is an example of an assistive device?"
+      choices:
+        text: ["contact lens", "motorcycle", "raincoat", "coffee pot"]
+        label: ["A", "B", "C", "D"]
+      answerKey: "A"
+    - id: NYSEDREGENTS_2006_8_10
+      question: "Rocks are classified as igneous, metamorphic, or sedimentary according to"
+      choices:
+        text: ["their color", "their shape", "how they formed", "the minerals they contain"]
+        label: ["1", "2", "3", "4"]
+      answerKey: "3"
+    - id: Mercury_7013388
+      question: "A chewable calcium carbonate tablet is a common treatment for stomach discomfort. Calcium carbonate is most likely used as this type of medicine because calcium carbonate"
+      choices:
+        text:
+          - "has a pleasant flavor."
+          - "is inexpensive to produce."
+          - "neutralizes digestive acid."
+          - "occurs naturally in the body."
+        label: ["A", "B", "C", "D"]
+      answerKey: "C"

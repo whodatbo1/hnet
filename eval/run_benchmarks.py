@@ -36,10 +36,11 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import lm_eval
+from lm_eval.tasks import TaskManager
 from lm_eval_wrapper import HNetLM
 
 
-# Paper benchmarks: task_name -> metric_key
+# Paper benchmarks: task_name -> metric_key (HNet paper Table 2 reproduction).
 PAPER_BENCHMARKS = {
     "lambada_openai": "acc",
     "hellaswag": "acc_norm",
@@ -49,6 +50,34 @@ PAPER_BENCHMARKS = {
     "winogrande": "acc",
     "openbookqa": "acc_norm",
 }
+
+# OLMES (arxiv 2406.08446): per logical task, run both cloze (CF) and
+# multiple-choice (MCF) formulations and report max. Headline metric for CF
+# under HNet's byte-level tokenizer is `acc_bytes` (acc / byte-length, equals
+# OLMES `acc_per_char` for ASCII text); for MCF it's just `acc`.
+OLMES_BENCHMARKS = {
+    "arc_challenge": {"cf": "olmes_arc_challenge_cf", "mcf": "olmes_arc_challenge_mcf"},
+    "arc_easy":      {"cf": "olmes_arc_easy_cf",      "mcf": "olmes_arc_easy_mcf"},
+    "boolq":         {"cf": "olmes_boolq_cf",         "mcf": "olmes_boolq_mcf"},
+    "csqa":          {"cf": "olmes_csqa_cf",          "mcf": "olmes_csqa_mcf"},
+    "hellaswag":     {"cf": "olmes_hellaswag_cf",     "mcf": "olmes_hellaswag_mcf"},
+    "openbookqa":    {"cf": "olmes_openbookqa_cf",    "mcf": "olmes_openbookqa_mcf"},
+    "piqa":          {"cf": "olmes_piqa_cf",          "mcf": "olmes_piqa_mcf"},
+    "siqa":          {"cf": "olmes_siqa_cf",          "mcf": "olmes_siqa_mcf"},
+    "winogrande":    {"cf": "olmes_winogrande_cf",    "mcf": "olmes_winogrande_mcf"},
+}
+OLMES_CF_METRICS = ["acc", "acc_norm", "acc_bytes"]
+OLMES_HEADLINE_CF_METRIC = "acc_bytes"
+
+
+def _lookup_metric(task_results, metric):
+    """lm-eval stores metric keys with ',<filter>' suffixes; match by prefix."""
+    for key, val in task_results.items():
+        if "stderr" in key:
+            continue
+        if key == metric or key.startswith(f"{metric},"):
+            return val
+    return None
 
 
 def freeze_pad_dims(model):
@@ -129,6 +158,16 @@ def _print_examples(results, tasks, n, hnet_lm):
             _print_one_sample(i, s, hnet_lm)
 
 
+def _fmt_ll(ll, cont):
+    """Format ll as raw sum and per-byte (matches `acc_bytes` normalization)."""
+    if ll is None:
+        return "ll=   n/a"
+    n_bytes = len(cont.encode("utf-8")) if cont else 0
+    if n_bytes == 0:
+        return f"ll={ll:+.3f}"
+    return f"ll={ll:+.3f} ({ll / n_bytes:+.3f}/byte)"
+
+
 def _print_one_sample(idx, sample, hnet_lm, ctx_max_chars=1000):
     args = sample.get("arguments") or []
     resps = sample.get("filtered_resps") or sample.get("resps") or []
@@ -157,8 +196,7 @@ def _print_one_sample(idx, sample, hnet_lm, ctx_max_chars=1000):
             for j, cont in enumerate(continuations):
                 marker = "→" if j == pred else " "
                 ll = lls[j] if j < len(lls) else None
-                ll_str = f"{ll:+.3f}" if ll is not None else "   n/a"
-                print(f"  {marker} [{j}] ll={ll_str}  {cont!r}")
+                print(f"  {marker} [{j}] {_fmt_ll(ll, cont)}  {cont!r}")
         else:
             # Winogrande-style: each choice substitutes a candidate into the context;
             # continuation is (usually) shared. Show per-choice contexts.
@@ -169,8 +207,8 @@ def _print_one_sample(idx, sample, hnet_lm, ctx_max_chars=1000):
             for j in range(len(contexts)):
                 marker = "→" if j == pred else " "
                 ll = lls[j] if j < len(lls) else None
-                ll_str = f"{ll:+.3f}" if ll is not None else "   n/a"
-                print(f"  {marker} [{j}] ll={ll_str}")
+                cont = shared_cont if shared_cont is not None else continuations[j]
+                print(f"  {marker} [{j}] {_fmt_ll(ll, cont)}")
                 print(f"        context:      {_trim(contexts[j])!r}")
                 if shared_cont is None:
                     print(f"        continuation: {continuations[j]!r}")
@@ -180,9 +218,8 @@ def _print_one_sample(idx, sample, hnet_lm, ctx_max_chars=1000):
         context = contexts[0]
         gold_cont = continuations[0]
         gold_ll = lls[0] if lls else None
-        ll_str = f"{gold_ll:+.3f}" if gold_ll is not None else "n/a"
         print(f"\n#{idx} Context:\n{_trim(context)}")
-        print(f"\nGold continuation: {gold_cont!r}  (ll={ll_str})")
+        print(f"\nGold continuation: {gold_cont!r}  ({_fmt_ll(gold_ll, gold_cont)})")
 
         try:
             gen = hnet_lm.generate_until(
@@ -223,79 +260,85 @@ def run_eval(args):
         else:
             print(f"  Hooked {n} stage(s) to zero original dims.")
 
+    olmes_mode = args.olmes
+    if olmes_mode and args.paper:
+        raise SystemExit("Pass at most one of --olmes / --paper.")
+
+    num_fewshot = args.num_fewshot
+    if num_fewshot is None:
+        num_fewshot = 5 if olmes_mode else 0
+
+    task_manager = None
+    if olmes_mode:
+        if not os.path.isdir(args.olmes_tasks_dir):
+            raise SystemExit(
+                f"OLMES tasks dir not found: {args.olmes_tasks_dir}"
+            )
+        task_manager = TaskManager(
+            include_path=args.olmes_tasks_dir, include_defaults=True
+        )
+
     if args.tasks:
         tasks = args.tasks.split(",")
+    elif olmes_mode:
+        tasks = []
+        for logical, ids in OLMES_BENCHMARKS.items():
+            if args.formulation in ("cf", "both"):
+                tasks.append(ids["cf"])
+            if args.formulation in ("mcf", "both"):
+                tasks.append(ids["mcf"])
     else:
         tasks = list(PAPER_BENCHMARKS.keys())
 
     print(f"Running tasks: {', '.join(tasks)}")
-    print(f"Batch size: {args.batch_size}, Max length: {args.max_length}")
+    print(f"Batch size: {args.batch_size}, Max length: {args.max_length}, "
+          f"Fewshot: {num_fewshot}")
     print("-" * 60)
 
     log_samples = args.log_samples or args.show_examples > 0
     results = lm_eval.simple_evaluate(
         model=model,
         tasks=tasks,
-        num_fewshot=0,
+        num_fewshot=num_fewshot,
         batch_size=args.batch_size,
         log_samples=log_samples,
+        task_manager=task_manager,
     )
 
     if args.show_examples > 0:
         _print_examples(results, tasks, args.show_examples, model)
 
-    # Print results table
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 80)
     print("RESULTS")
-    print("=" * 60)
-    print(f"{'Task':<20} {'Metric':<12} {'Score':>8}")
-    print("-" * 60)
+    print("=" * 80)
 
-    scores = []
-    for task_name in tasks:
-        if task_name not in results["results"]:
-            print(f"{task_name:<20} {'N/A':<12} {'N/A':>8}")
-            continue
-
-        task_results = results["results"][task_name]
-        metric_key = PAPER_BENCHMARKS.get(task_name, "acc")
-
-        # lm-eval stores metrics with comma-separated aliases
-        score = None
-        for key, val in task_results.items():
-            if metric_key in key and "stderr" not in key:
-                score = val
-                break
-
-        if score is not None:
-            print(f"{task_name:<20} {metric_key:<12} {score * 100:>7.1f}%")
-            scores.append(score)
-        else:
-            print(f"{task_name:<20} {metric_key:<12} {'N/A':>8}")
-
-    if scores:
-        avg = sum(scores) / len(scores)
-        print("-" * 60)
-        print(f"{'Average':<20} {'':>12} {avg * 100:>7.1f}%")
-    print("=" * 60)
+    if olmes_mode:
+        olmes_summary = _print_olmes_table(results, args.formulation)
+    else:
+        olmes_summary = None
+        _print_paper_table(results, tasks)
 
     # Save results
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = os.path.splitext(os.path.basename(args.config_path))[0]
+        suffix = "olmes" if olmes_mode else "paper"
         output_path = os.path.join(
-            args.output_dir, f"{model_name}_{timestamp}.json"
+            args.output_dir, f"{model_name}_{suffix}_{timestamp}.json"
         )
 
         output = {
             "model_path": args.model_path,
             "config_path": args.config_path,
             "tasks": tasks,
-            "num_fewshot": 0,
+            "num_fewshot": num_fewshot,
             "batch_size": args.batch_size,
             "max_length": args.max_length,
             "timestamp": timestamp,
+            "mode": "olmes" if olmes_mode else "paper",
+            "formulation": args.formulation if olmes_mode else None,
+            "olmes_summary": olmes_summary,
             "results": results["results"],
         }
 
@@ -304,6 +347,95 @@ def run_eval(args):
         print(f"\nResults saved to {output_path}")
 
     return results
+
+
+def _print_paper_table(results, tasks):
+    print(f"{'Task':<20} {'Metric':<12} {'Score':>8}")
+    print("-" * 60)
+    scores = []
+    for task_name in tasks:
+        if task_name not in results["results"]:
+            print(f"{task_name:<20} {'N/A':<12} {'N/A':>8}")
+            continue
+        metric_key = PAPER_BENCHMARKS.get(task_name, "acc")
+        score = _lookup_metric(results["results"][task_name], metric_key)
+        if score is not None:
+            print(f"{task_name:<20} {metric_key:<12} {score * 100:>7.1f}%")
+            scores.append(score)
+        else:
+            print(f"{task_name:<20} {metric_key:<12} {'N/A':>8}")
+    if scores:
+        avg = sum(scores) / len(scores)
+        print("-" * 60)
+        print(f"{'Average':<20} {'':>12} {avg * 100:>7.1f}%")
+    print("=" * 60)
+
+
+def _print_olmes_table(results, formulation):
+    """Per logical task, print full breakdown: CF (acc, acc_norm, acc_bytes), MCF acc, max."""
+    cols = (
+        f"{'Task':<16}"
+        f"{'CF acc':>9}"
+        f"{'CF acc_n':>10}"
+        f"{'CF acc_b':>10}"
+        f"{'MCF acc':>10}"
+        f"{'max':>9}"
+        f"  source"
+    )
+    print(cols)
+    print("-" * len(cols))
+
+    summary = {}
+    headline_scores = []
+    for logical, ids in OLMES_BENCHMARKS.items():
+        cf_id, mcf_id = ids["cf"], ids["mcf"]
+        cf_res = results["results"].get(cf_id) if formulation in ("cf", "both") else None
+        mcf_res = results["results"].get(mcf_id) if formulation in ("mcf", "both") else None
+
+        cf_acc = _lookup_metric(cf_res, "acc") if cf_res else None
+        cf_norm = _lookup_metric(cf_res, "acc_norm") if cf_res else None
+        cf_bytes = _lookup_metric(cf_res, "acc_bytes") if cf_res else None
+        mcf_acc = _lookup_metric(mcf_res, "acc") if mcf_res else None
+
+        cf_headline = cf_bytes if cf_bytes is not None else cf_norm if cf_norm is not None else cf_acc
+        candidates = []
+        if cf_headline is not None:
+            candidates.append((cf_headline, "cf"))
+        if mcf_acc is not None:
+            candidates.append((mcf_acc, "mcf"))
+        if candidates:
+            best_score, best_src = max(candidates, key=lambda x: x[0])
+        else:
+            best_score, best_src = None, "n/a"
+
+        def fmt(v):
+            return f"{v * 100:>8.1f}%" if v is not None else f"{'-':>9}"
+
+        # Print row
+        print(
+            f"{logical:<16}"
+            f"{fmt(cf_acc)}"
+            f"{fmt(cf_norm).rjust(10)}"
+            f"{fmt(cf_bytes).rjust(10)}"
+            f"{fmt(mcf_acc).rjust(10)}"
+            f"{fmt(best_score)}"
+            f"  {best_src}"
+        )
+
+        summary[logical] = {
+            "cf": {"acc": cf_acc, "acc_norm": cf_norm, "acc_bytes": cf_bytes},
+            "mcf": {"acc": mcf_acc},
+            "headline": {"score": best_score, "source": best_src},
+        }
+        if best_score is not None:
+            headline_scores.append(best_score)
+
+    if headline_scores:
+        avg = sum(headline_scores) / len(headline_scores)
+        print("-" * len(cols))
+        print(f"{'Average (max)':<55}{avg * 100:>8.1f}%")
+    print("=" * len(cols))
+    return summary
 
 
 def main():
@@ -370,6 +502,41 @@ def main():
             "per-choice loglikelihoods (MC) or gold continuation + greedy generation "
             "(loglikelihood tasks like lambada). Forces log_samples=True."
         ),
+    )
+    parser.add_argument(
+        "--olmes",
+        action="store_true",
+        help=(
+            "Run the OLMES-9 task suite (arxiv 2406.08446) with curated 5-shot "
+            "examples and both cloze (CF) and multiple-choice (MCF) formulations. "
+            "MMLU is staged separately and not included here."
+        ),
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Run the original HNet paper benchmarks (PAPER_BENCHMARKS), 0-shot.",
+    )
+    parser.add_argument(
+        "--formulation",
+        choices=["cf", "mcf", "both"],
+        default="both",
+        help="Which OLMES formulation(s) to run. Only used with --olmes.",
+    )
+    parser.add_argument(
+        "--num-fewshot",
+        type=int,
+        default=None,
+        help=(
+            "In-context examples per task. Default: 5 with --olmes, 0 with --paper. "
+            "Overrides any task-config default."
+        ),
+    )
+    parser.add_argument(
+        "--olmes-tasks-dir",
+        type=str,
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "olmes_tasks"),
+        help="Directory containing OLMES task YAML files (used with --olmes).",
     )
 
     args = parser.parse_args()

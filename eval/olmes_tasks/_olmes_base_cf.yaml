@@ -1,0 +1,18 @@
+# OLMES cloze formulation (CF / RC) base.
+# Each leaf provides task name, dataset coordinates, doc_to_text/choice/target,
+# and the 5-shot `fewshot_config.samples` list (curated from allenai/olmes:
+# oe_eval/tasks/fewshot_sources.py — "OLMES:<task>", first 5 entries).
+output_type: multiple_choice
+target_delimiter: " "
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_norm
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_bytes
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 0.1

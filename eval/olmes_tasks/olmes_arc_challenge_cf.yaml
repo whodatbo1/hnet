@@ -1,0 +1,61 @@
+include: _olmes_base_cf.yaml
+task: olmes_arc_challenge_cf
+dataset_path: allenai/ai2_arc
+dataset_name: ARC-Challenge
+test_split: test
+doc_to_text: "Question: {{question}}\nAnswer:"
+doc_to_target: "{{choices.label.index(answerKey)}}"
+doc_to_choice: "{{choices.text}}"
+fewshot_config:
+  sampler: first_n
+  samples:
+    - id: Mercury_SC_415702
+      question: "George wants to warm his hands quickly by rubbing them. Which skin surface will produce the most heat?"
+      choices:
+        text:
+          - "dry palms"
+          - "wet palms"
+          - "palms covered with oil"
+          - "palms covered with lotion"
+        label: ["A", "B", "C", "D"]
+      answerKey: "A"
+    - id: MCAS_2009_5_6516
+      question: "Which of the following statements best explains why magnets usually stick to a refrigerator door?"
+      choices:
+        text:
+          - "The refrigerator door is smooth."
+          - "The refrigerator door contains iron."
+          - "The refrigerator door is a good conductor."
+          - "The refrigerator door has electric wires in it."
+        label: ["A", "B", "C", "D"]
+      answerKey: "B"
+    - id: Mercury_7233695
+      question: "A fold observed in layers of sedimentary rock most likely resulted from the"
+      choices:
+        text:
+          - "cooling of flowing magma."
+          - "converging of crustal plates."
+          - "deposition of river sediments."
+          - "solution of carbonate minerals."
+        label: ["A", "B", "C", "D"]
+      answerKey: "B"
+    - id: Mercury_7041615
+      question: "Which of these do scientists offer as the most recent explanation as to why many plants and animals died out at the end of the Mesozoic era?"
+      choices:
+        text:
+          - "worldwide disease"
+          - "global mountain building"
+          - "rise of mammals that preyed upon plants and animals"
+          - "impact of an asteroid created dust that blocked the sunlight"
+        label: ["A", "B", "C", "D"]
+      answerKey: "D"
+    - id: MCAS_1998_4_3
+      question: "Which of the following is a trait that a dog does NOT inherit from its parents?"
+      choices:
+        text:
+          - "the length of its fur"
+          - "the shape of its nose"
+          - "the size of its appetite"
+          - "the color of its fur"
+        label: ["A", "B", "C", "D"]
+      answerKey: "C"

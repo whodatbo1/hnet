@@ -1,0 +1,45 @@
+include: _olmes_base_mcf.yaml
+task: olmes_csqa_mcf
+dataset_path: tau/commonsense_qa
+validation_split: validation
+doc_to_text: !function _olmes_utils.csqa_mcf_doc_to_text
+doc_to_choice: !function _olmes_utils.csqa_mcf_doc_to_choice
+doc_to_target: !function _olmes_utils.csqa_mcf_doc_to_target
+fewshot_config:
+  sampler: first_n
+  samples:
+    - id: "61fe6e879ff18686d7552425a36344c8"
+      question: "Sammy wanted to go to where the people were.  Where might he go?"
+      question_concept: "people"
+      choices:
+        label: ["A", "B", "C", "D", "E"]
+        text: ["race track", "populated areas", "the desert", "apartment", "roadblock"]
+      answerKey: "B"
+    - id: "02e821a3e53cb320790950aab4489e85"
+      question: "Google Maps and other highway and street GPS services have replaced what?"
+      question_concept: "highway"
+      choices:
+        label: ["A", "B", "C", "D", "E"]
+        text: ["united states", "mexico", "countryside", "atlas", "oceans"]
+      answerKey: "D"
+    - id: "23505889b94e880c3e89cff4ba119860"
+      question: "The fox walked from the city into the forest, what was it looking for?"
+      question_concept: "fox"
+      choices:
+        label: ["A", "B", "C", "D", "E"]
+        text: ["pretty flowers.", "hen house", "natural habitat", "storybook", "dense forest"]
+      answerKey: "C"
+    - id: "a76403b4921a9281b6ee2a7241a5ec9f"
+      question: "What is it called when you slowly cook using a grill?"
+      question_concept: "grill"
+      choices:
+        label: ["A", "B", "C", "D", "E"]
+        text: ["backyard", "restaurant", "crockpot", "neighbor's house", "barbeque"]
+      answerKey: "E"
+    - id: "6dc921840aa1e5dda3333b79007f630b"
+      question: "What would you do if you want to be able to earn money?"
+      question_concept: "money"
+      choices:
+        label: ["A", "B", "C", "D", "E"]
+        text: ["apply for job", "stand in line", "take care of proposals", "pass course", "play the lottery"]
+      answerKey: "A"
