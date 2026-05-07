@@ -35,6 +35,7 @@ class RoutingConfig:
     learn_entropy_threshold: bool = True
     single_projection: bool = False
     bm_head_cos_routing: bool = False
+    space_like_routing: bool = False
 
 @dataclass
 class HNetConfig:

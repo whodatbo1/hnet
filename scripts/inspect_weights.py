@@ -220,7 +220,7 @@ def extract_metrics_for_model(
             print(f"Metrics written to {output_path}")
     else:
         all_steps = []
-        for step in range(500, 10500, 500):
+        for step in range(1000, 35000, 1000):
             print(f"Loading train weights for step: {step}")
             try:
                 model = load_from_pretrained(

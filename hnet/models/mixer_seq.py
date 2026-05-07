@@ -150,7 +150,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         hidden_states = self.embeddings(input_ids)
 
         hidden_states, bpred_output = self.backbone.step(
-            hidden_states, inference_params
+            hidden_states, inference_params, input_ids=input_ids
         )
         logits = self.lm_head(hidden_states)
 

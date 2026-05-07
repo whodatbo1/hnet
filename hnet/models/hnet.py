@@ -278,7 +278,8 @@ class HNet(nn.Module):
             cu_seqlens=cu_seqlens,
             mask=mask,
             inference_params=inference_params.routing_module_state,
-            targets=targets
+            targets=targets,
+            input_ids=input_ids,
         )
         hidden_states, next_cu_seqlens, next_max_seqlen, next_mask = self.chunk_layer(
             hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
@@ -333,7 +334,7 @@ class HNet(nn.Module):
         hidden_states = hidden_states[..., :D]
         return hidden_states, [bpred_output, *prev_boundary_predictions]
 
-    def step(self, hidden_states, inference_params):
+    def step(self, hidden_states, inference_params, input_ids=None):
         D = hidden_states.shape[-1]
 
         if self.pad_dimension is not None:
@@ -359,15 +360,22 @@ class HNet(nn.Module):
         residual = self.residual_proj(hidden_states_for_residual)
 
         bpred_output = self.routing_module.step(
-            hidden_states, inference_params.routing_module_state
+            hidden_states,
+            inference_params.routing_module_state,
+            input_ids=input_ids,
         )
         hidden_states_inner = self.chunk_layer.step(
             hidden_states, bpred_output.boundary_mask
         )
 
         if hidden_states_inner.shape[0] > 0:
+            inner_input_ids = (
+                input_ids[bpred_output.boundary_mask] if input_ids is not None else None
+            )
             hidden_states_inner, prev_boundary_predictions = self.main_network.step(
-                hidden_states_inner, inference_params.main_network_state
+                hidden_states_inner,
+                inference_params.main_network_state,
+                input_ids=inner_input_ids,
             )
         else:
             prev_boundary_predictions = []

@@ -18,6 +18,20 @@ from hnet.modules.utils import get_seq_idx
 from hnet.models.config_hnet import RoutingConfig
 
 
+def _is_space_like_byte(tokens: torch.Tensor) -> torch.Tensor:
+    """SpaceByte heuristic (arxiv 2404.14408): True at every "space-like" byte —
+    non-alphanumeric printable ASCII or UTF-8 multibyte start byte. ASCII
+    alphanumerics and UTF-8 continuation bytes (0x80-0xBF) stay inside patches.
+    """
+    return (
+        (tokens < ord('0'))
+        | ((ord('9') < tokens) & (tokens < ord('A')))
+        | ((ord('Z') < tokens) & (tokens < ord('a')))
+        | ((ord('z') < tokens) & (tokens < 0b1000_0000))
+        | (0b1100_0000 <= tokens)
+    )
+
+
 @dataclass
 class RoutingModuleOutput:
     boundary_prob: torch.Tensor
@@ -77,6 +91,8 @@ class RoutingModule(nn.Module):
         self.multiheaded = routing_cfg.multiheaded
         self.d_similarity = routing_cfg.d_similarity if routing_cfg.d_similarity > 0 else d_model
         self.softmax_gating = routing_cfg.softmax_gating
+
+        self.space_like_routing = routing_cfg.space_like_routing
         
         if self.multiheaded:
             assert self.d_similarity % routing_cfg.num_heads == 0, "d_similarity should be divisible by num_heads"
@@ -140,7 +156,8 @@ class RoutingModule(nn.Module):
         cu_seqlens=None,
         mask=None,
         inference_params=None,
-        targets=None
+        targets=None,
+        input_ids=None,
     ) -> RoutingModuleOutput:
         assert (mask is not None) or (
             cu_seqlens is not None
@@ -230,6 +247,17 @@ class RoutingModule(nn.Module):
                     targets.reshape(-1),
                     ignore_index=-100,
                 )
+        elif self.space_like_routing:
+            assert input_ids is not None, (
+                "space_like_routing requires input_ids — thread it from HNet.forward"
+            )
+            # Match hidden_states' (B, T, ·) layout: input_ids is (T,) in packed
+            # mode and (B, T) in mask mode.
+            tokens = input_ids if input_ids.dim() == 2 else input_ids.unsqueeze(0)
+            is_space_like = _is_space_like_byte(tokens)
+            boundary_prob = is_space_like.to(hidden_states.dtype).clone()
+            # Force the first position to be a boundary (PAD_PROB convention).
+            boundary_prob[:, 0] = 1.0
         elif self.bm_head_cos_routing:
             bm_logits = self.bm_head(hidden_states)  # (B, T, vocab_size)
             log_probs = bm_logits.log_softmax(-1)
@@ -307,7 +335,7 @@ class RoutingModule(nn.Module):
             entropy_std=batch_entropy_std,
         )
 
-    def step(self, hidden_states, inference_params):
+    def step(self, hidden_states, inference_params, input_ids=None):
         assert self.multiheaded is False, "step() not implemented for Multiheaded BP"
         
         # hidden_states is (B, 1, D)
@@ -350,6 +378,12 @@ class RoutingModule(nn.Module):
             boundary_prob_scalar = torch.sigmoid(
                 (entropy_signal - self.entropy_threshold) / temperature
             )
+        elif self.space_like_routing:
+            assert input_ids is not None, (
+                "space_like_routing requires input_ids — pass it to step()"
+            )
+            tokens = input_ids.reshape(-1)  # (B,) — single time step per batch row
+            boundary_prob_scalar = _is_space_like_byte(tokens).to(hidden_states.dtype)
         elif self.bm_head_cos_routing:
             # bm_head is not queried at inference (no targets); routing uses Q/K cos-sim
             cos_sim = torch.einsum(
