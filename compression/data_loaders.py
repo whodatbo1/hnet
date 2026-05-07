@@ -24,16 +24,17 @@ import urllib.request
 import zipfile
 
 import numpy as np
-import tensorflow_datasets as tfds
 
-from language_modeling_is_compression import constants
+import constants
 
 
 def _get_librispeech_dataset():
+  import tensorflow_datasets as tfds
   return tfds.load('librispeech', split='train_clean100')
 
 
 def _get_imagenet_dataset():
+  import tensorflow_datasets as tfds
   return tfds.load('imagenet2012')['full']
 
 
