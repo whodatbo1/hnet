@@ -148,9 +148,10 @@ def _save_results(args, results: dict) -> str:
         "compressor": args.compressor,
         "dataset": args.dataset,
         "num_chunks": args.num_chunks,
-        "chunk_size_bytes": constants.CHUNK_SIZE_BYTES,
+        "chunk_size_bytes": args.chunk_size,
         "model_path": args.model_path,
         "config_path": args.config_path,
+        "model_name": args.result_model_name,
         "timestamp": timestamp,
         **results,
     }
@@ -159,7 +160,11 @@ def _save_results(args, results: dict) -> str:
     if "unchunked_rate" in payload:
         payload["unchunked_bits_per_byte"] = 8 * payload["unchunked_rate"]
 
-    filename = f"{args.compressor}_{args.dataset}_n{args.num_chunks}_{timestamp}.json"
+    name_suffix = f"_{args.result_model_name}" if args.result_model_name else ""
+    filename = (
+        f"{args.compressor}_{args.dataset}"
+        f"_n{args.num_chunks}{name_suffix}_{timestamp}.json"
+    )
     path = os.path.join(RESULTS_DIR, filename)
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -191,6 +196,13 @@ def main():
         help=f"Number of chunks (default: {constants.NUM_CHUNKS})",
     )
     parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=constants.CHUNK_SIZE_BYTES,
+        help=f"Bytes per chunk; only honored by enwik9 and random datasets "
+             f"(default: {constants.CHUNK_SIZE_BYTES})",
+    )
+    parser.add_argument(
         "--model-path",
         type=str,
         default=None,
@@ -203,6 +215,13 @@ def main():
         default=None,
         help="Path to the model configuration (.json file). "
              "Required for the language_model compressor.",
+    )
+    parser.add_argument(
+        "--result-model-name",
+        type=str,
+        default=None,
+        help="Short tag appended to the results filename to disambiguate "
+             "multiple H-Net variants (e.g., 'XXS_10B').",
     )
     args = parser.parse_args()
 
@@ -221,10 +240,22 @@ def main():
     else:
         compress_fn = compressor.COMPRESS_FN_DICT[args.compressor]
 
-    get_data_generator_fn = functools.partial(
-        data_loaders.GET_DATA_GENERATOR_FN_DICT[args.dataset],
-        num_chunks=args.num_chunks,
-    )
+    data_loader_fn = data_loaders.GET_DATA_GENERATOR_FN_DICT[args.dataset]
+    if args.dataset in ("enwik9", "random"):
+        get_data_generator_fn = functools.partial(
+            data_loader_fn,
+            num_chunks=args.num_chunks,
+            sequence_length=args.chunk_size,
+        )
+    else:
+        if args.chunk_size != constants.CHUNK_SIZE_BYTES:
+            parser.error(
+                f"--chunk-size is only supported for enwik9 and random datasets "
+                f"(imagenet/librispeech use fixed-size patches)."
+            )
+        get_data_generator_fn = functools.partial(
+            data_loader_fn, num_chunks=args.num_chunks
+        )
 
     if args.compressor in compressor.COMPRESSOR_TYPES["classical"]:
         unchunked_rate, unchunked_time = evaluate_compressor_unchunked(

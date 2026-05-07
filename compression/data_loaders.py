@@ -95,10 +95,11 @@ def get_librispeech_iterator(
 
 def get_random_iterator(
     num_chunks: int = constants.NUM_CHUNKS,
+    sequence_length: int = constants.CHUNK_SIZE_BYTES,
 ) -> Iterator[bytes]:
   """Returns an iterator for random data."""
   for _ in range(num_chunks):
-    yield random.randbytes(constants.CHUNK_SIZE_BYTES)
+    yield random.randbytes(sequence_length)
 
 
 def _rgb_to_grayscale(image: np.ndarray) -> np.ndarray:
