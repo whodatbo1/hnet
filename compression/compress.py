@@ -17,6 +17,7 @@
 
 import argparse
 import functools
+import json
 import os
 import sys
 import time
@@ -27,9 +28,10 @@ import tqdm
 
 import constants
 import data_loaders
-import utils
 from compressors import compressor
 from compressors import language_model
+
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
 # Make the repo root importable so `from generate import load_from_pretrained`
 # resolves regardless of where this script is invoked from.
@@ -138,6 +140,32 @@ def _build_language_model_compress_fn(model_path: str, config_path: str):
     return functools.partial(language_model.compress, predict_fn=predict_fn)
 
 
+def _save_results(args, results: dict) -> str:
+    """Writes a JSON record of the run to RESULTS_DIR and returns the path."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    payload = {
+        "compressor": args.compressor,
+        "dataset": args.dataset,
+        "num_chunks": args.num_chunks,
+        "chunk_size_bytes": constants.CHUNK_SIZE_BYTES,
+        "model_path": args.model_path,
+        "config_path": args.config_path,
+        "timestamp": timestamp,
+        **results,
+    }
+    if "chunked_rate" in payload:
+        payload["chunked_bits_per_byte"] = 8 * payload["chunked_rate"]
+    if "unchunked_rate" in payload:
+        payload["unchunked_bits_per_byte"] = 8 * payload["unchunked_rate"]
+
+    filename = f"{args.compressor}_{args.dataset}_n{args.num_chunks}_{timestamp}.json"
+    path = os.path.join(RESULTS_DIR, filename)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate a lossless compressor on a dataset."
@@ -214,23 +242,32 @@ def main():
         print(f"Unchunked: {100 * unchunked_rate:.1f} [{unchunked_time:.1f}s]")
         print(f"Chunked:   {100 * chunked_rate:.1f} [{chunked_time:.1f}s]")
 
-    elif args.compressor in compressor.COMPRESSOR_TYPES["arithmetic_coding"]:
-        # To compress bytes data, we convert it first to ASCII.
-        if args.dataset == "enwik9":
-            # For enwik9, some characters are UTF-8 but not ASCII, so we still
-            # need to do the conversion.
-            mask_fn = utils.zero_most_significant_bit_if_not_ascii_decodable
-        else:
-            mask_fn = utils.right_shift_bytes_by_one
+        results = {
+            "unchunked_rate": unchunked_rate,
+            "unchunked_time_s": unchunked_time,
+            "chunked_rate": chunked_rate,
+            "chunked_time_s": chunked_time,
+        }
 
+    elif args.compressor in compressor.COMPRESSOR_TYPES["arithmetic_coding"]:
+        # The byte-level H-Net was trained on raw bytes, so feed chunks
+        # directly to the model without ASCII / right-shift masking.
         chunked_rate, chunked_time = evaluate_compressor_chunked(
             compress_fn=compress_fn,
             get_data_generator_fn=get_data_generator_fn,
             num_chunks=args.num_chunks,
             count_header_only_once=False,
-            mask_fn=mask_fn,
+            mask_fn=None,
         )
         print(f"Chunked: {100 * chunked_rate:.1f} [{chunked_time:.1f}s]")
+
+        results = {
+            "chunked_rate": chunked_rate,
+            "chunked_time_s": chunked_time,
+        }
+
+    saved_path = _save_results(args, results)
+    print(f"Saved results to {saved_path}")
 
 
 if __name__ == "__main__":
