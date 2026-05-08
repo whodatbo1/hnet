@@ -198,5 +198,7 @@ wandb/
 viz_entropy/
 eval/results
 jobs/
+compression/results/
+compression/enwik*
 
 .vscode/

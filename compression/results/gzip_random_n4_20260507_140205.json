@@ -1,0 +1,15 @@
+{
+  "compressor": "gzip",
+  "dataset": "random",
+  "num_chunks": 4,
+  "chunk_size_bytes": 2048,
+  "model_path": null,
+  "config_path": null,
+  "timestamp": "20260507_140205",
+  "unchunked_rate": 1.0028076171875,
+  "unchunked_time_s": 0.00042100000428035855,
+  "chunked_rate": 1.0035400390625,
+  "chunked_time_s": 0.00036795897176489234,
+  "chunked_bits_per_byte": 8.0283203125,
+  "unchunked_bits_per_byte": 8.0224609375
+}

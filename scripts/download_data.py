@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Download FineWeb-Edu (English), FineWeb-Edu-Chinese, FineWeb-2, or The Stack V2 Smol from HuggingFace.
+Download FineWeb-Edu (English), FineWeb-Edu-Chinese, FineWeb-2, HPLT v3.0,
+or The Stack V2 Smol.
 
 Usage:
     # English (default)
@@ -14,6 +15,11 @@ Usage:
     # FineWeb-2 (any language — see https://huggingface.co/datasets/HuggingFaceFW/fineweb-2)
     python download_data.py --dataset fineweb-2 --subset kor_Hang     # Korean (~98 GB)
     python download_data.py --dataset fineweb-2 --subset arb_Arab     # Arabic
+
+    # HPLT v3.0 (https://hplt-project.org/datasets/v3.0) — fixed-byte slice per language
+    python download_data.py --dataset hplt --subset nld_Latn          # Dutch (10 GB text default)
+    python download_data.py --dataset hplt --subset eng_Latn --target-bytes 10000000000
+    python download_data.py --dataset hplt --subset cmn_Hans --target-bytes 5000000000
 
     # Code (The Stack V2 Smol) — requires AWS credentials for SWH S3 access
     python download_data.py --dataset the-stack-v2-smol
@@ -132,6 +138,117 @@ def download_fineweb_2(output_dir: str, subset: str = "kor_Hang"):
 
     print(f"Successfully downloaded to: {model_path}")
     return model_path
+
+
+def download_hplt(output_dir: str, subset: str = "nld_Latn",
+                  target_bytes: int = 10_000_000_000,
+                  shard_doc_count: int = 100_000):
+    """Download a fixed-byte slice of HPLT v3.0 for one language.
+
+    HPLT v3.0 (https://hplt-project.org/datasets/v3.0) ships per-language
+    `.jsonl.zst` shards on data.hplt-project.org, sorted by document quality.
+    A `.map` index lists shards in priority order: top-quality bin (`10_*`)
+    first, followed by `5_*`–`9_*` shards.
+
+    This function streams shards in that order, decompresses on the fly,
+    extracts the `text` field from each JSON document, and writes parquet
+    shards (`text` column only) until ``target_bytes`` of UTF-8 text has
+    been written. Critical for large languages (e.g. eng_Latn, cmn_Hans)
+    where a single source shard already exceeds the target slice size.
+
+    Output layout (matches what prepare_data.py expects for `--dataset hplt`):
+        <output_dir>/hplt-<subset>/<subset>/shard-NNNNN.parquet
+
+    Args:
+        output_dir: Root directory to save the dataset.
+        subset: HPLT language code, e.g. "nld_Latn", "fin_Latn", "eng_Latn",
+                "bul_Cyrl", "cmn_Hans". See manifest at
+                https://data.hplt-project.org/three/sorted/manifest.json
+        target_bytes: UTF-8 text bytes to extract before stopping.
+        shard_doc_count: Documents per output parquet shard.
+    """
+    import io
+    import json
+    import urllib.request
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import zstandard as zstd
+
+    base = "https://data.hplt-project.org/three/sorted"
+
+    output_path = Path(output_dir)
+    local_dir = output_path / f"hplt-{subset}"
+    parquet_dir = local_dir / subset
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+
+    map_url = f"{base}/{subset}.map"
+    print(f"Fetching shard list from {map_url}")
+    with urllib.request.urlopen(map_url, timeout=60) as r:
+        shard_urls = [line.decode().strip() for line in r if line.strip()]
+    print(f"Found {len(shard_urls)} shards. "
+          f"Targeting {target_bytes / 1e9:.2f} GB of text into {parquet_dir}")
+
+    written_bytes = 0
+    written_docs = 0
+    shard_idx = 0
+    buffer: list[dict] = []
+
+    def _flush():
+        nonlocal shard_idx, buffer
+        if not buffer:
+            return
+        path = parquet_dir / f"shard-{shard_idx:05d}.parquet"
+        pq.write_table(pa.Table.from_pylist(buffer), str(path))
+        print(f"  Wrote {path.name} ({len(buffer):,} docs)")
+        shard_idx += 1
+        buffer = []
+
+    for url in shard_urls:
+        if written_bytes >= target_bytes:
+            break
+        print(f"\nShard {url.rsplit('/', 1)[-1]}  "
+              f"(progress {written_bytes / 1e9:.2f}/{target_bytes / 1e9:.2f} GB)")
+        req = urllib.request.Request(url, headers={"User-Agent": "hnet-hplt/1.0"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=120)
+        except Exception as e:
+            print(f"  [error] failed to open {url}: {e}", file=sys.stderr)
+            continue
+
+        with resp:
+            dctx = zstd.ZstdDecompressor()
+            with dctx.stream_reader(resp) as reader:
+                text_stream = io.TextIOWrapper(reader, encoding="utf-8",
+                                               errors="replace")
+                for line in text_stream:
+                    if written_bytes >= target_bytes:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        doc = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    text = doc.get("text") or ""
+                    if not text:
+                        continue
+                    buffer.append({"text": text})
+                    written_bytes += len(text.encode("utf-8"))
+                    written_docs += 1
+                    if len(buffer) >= shard_doc_count:
+                        _flush()
+
+    _flush()
+
+    if written_bytes < target_bytes:
+        print(f"\nWarning: exhausted shards with {written_bytes / 1e9:.2f} GB "
+              f"(< target {target_bytes / 1e9:.2f} GB).", file=sys.stderr)
+    print(f"\nDone: {written_bytes / 1e9:.2f} GB across "
+          f"{shard_idx} parquet shards ({written_docs:,} docs).")
+    print(f"Output: {parquet_dir}")
+    return str(local_dir)
 
 
 def download_starcoderdata(output_dir: str, subset: str = None):
@@ -309,13 +426,14 @@ def download_the_stack_v2_smol(output_dir: str, num_workers: int = 32,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Download FineWeb-Edu (English/Chinese), FineWeb-2, or The Stack V2 Smol from HuggingFace"
+        description="Download FineWeb-Edu (English/Chinese), FineWeb-2, HPLT v3.0, or The Stack V2 Smol"
     )
     parser.add_argument(
         "--dataset",
         type=str,
         default="fineweb-edu",
-        choices=["fineweb-edu", "fineweb-edu-chinese", "fineweb-2", "the-stack-v2-smol", "starcoderdata"],
+        choices=["fineweb-edu", "fineweb-edu-chinese", "fineweb-2", "hplt",
+                 "the-stack-v2-smol", "starcoderdata"],
         help="Which dataset to download (default: fineweb-edu)",
     )
     parser.add_argument(
@@ -333,9 +451,16 @@ if __name__ == "__main__":
             "For fineweb-edu: e.g. 'sample-10BT' (default). "
             "For fineweb-edu-chinese: score range '2_3', '3_4', or '4_5' (default: '3_4'). "
             "For fineweb-2: language code, e.g. 'kor_Hang' (default). "
+            "For hplt: language code, e.g. 'nld_Latn' (default). "
             "For starcoderdata: language, e.g. 'python' (default: all). "
             "Not used for the-stack-v2-smol (downloads all languages)."
         ),
+    )
+    parser.add_argument(
+        "--target-bytes",
+        type=int,
+        default=10_000_000_000,
+        help="UTF-8 text byte budget per language (hplt only, default 10 GB)",
     )
     parser.add_argument(
         "--num-workers",
@@ -358,6 +483,9 @@ if __name__ == "__main__":
     elif args.dataset == "fineweb-2":
         subset = args.subset if args.subset is not None else "kor_Hang"
         download_fineweb_2(args.output_dir, subset)
+    elif args.dataset == "hplt":
+        subset = args.subset if args.subset is not None else "nld_Latn"
+        download_hplt(args.output_dir, subset, target_bytes=args.target_bytes)
     elif args.dataset == "starcoderdata":
         download_starcoderdata(args.output_dir, subset=args.subset)
     elif args.dataset == "the-stack-v2-smol":

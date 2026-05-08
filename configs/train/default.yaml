@@ -24,7 +24,13 @@ downsample_n: 2.5       # Expected downsampling factor N
 
 # --- Data ---
 data_dir: /projects/0/hpmlprjs/interns/marko/hnet/data/  # Local data root (download with download_data.py)
-dataset_config: sample-10BT  # Dataset subset name
+dataset_config: sample-10BT  # Dataset subset name (single-source mode)
+# Multilingual mixture (overrides dataset_config when set). Each entry's `name`
+# resolves the same way as dataset_config; weights are normalized to 1 and used
+# to sample the source for every training example.
+# dataset_mixture:
+#   - {name: hplt-eng_Latn, weight: 0.75}
+#   - {name: hplt-nld_Latn, weight: 0.25}
 seq_len: 8192
 seed: 42
 
