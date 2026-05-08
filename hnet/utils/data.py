@@ -15,6 +15,18 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
 
 
+# Subsets whose dir name is used verbatim under <data_dir>/. Anything else
+# resolves to <data_dir>/fineweb-edu-<subset>/ for backwards compat with the
+# original FineWeb-Edu setup.
+_RAW_SUBSET_PREFIXES = ("the-stack-v2-smol", "starcoderdata", "fineweb-2", "hplt")
+
+
+def _resolve_subset_dir(data_dir: Path, subset: str) -> Path:
+    if subset.startswith(_RAW_SUBSET_PREFIXES):
+        return data_dir / subset
+    return data_dir / f"fineweb-edu-{subset}"
+
+
 class MemmapByteDataset(IterableDataset):
     """Reads fixed-length chunks from a pre-tokenized uint8 binary file.
 
@@ -76,51 +88,143 @@ class MemmapByteDataset(IterableDataset):
                 return
 
 
-def create_dataloaders(data_dir, data_subset, seq_len, seed, val_batches, batch_size, num_workers):
+class MultilingualByteDataset(IterableDataset):
+    """Multiplex several MemmapByteDatasets at configured weights.
+
+    On every yield, picks one source by weighted-random choice and pulls its
+    next chunk. When a source's per-worker iterator is exhausted, it is
+    re-iterated (so smaller languages cycle more often — that is the whole
+    point of the weight knob). DDP/worker sharding is delegated to each
+    sub-dataset, which already shards by global_worker_id.
+
+    Args:
+        sub_datasets: List of MemmapByteDataset instances, one per source.
+        weights: Sampling weights (will be normalized to sum to 1).
+        seed: Base seed for the language-choice RNG. Per-worker seeds are
+              derived as seed + 9973 * global_worker_id, distinct from the
+              chunk-shuffle seed used inside each sub-dataset.
+        max_samples: If set, cap total per-worker yields (used to cap val).
+    """
+
+    def __init__(self, sub_datasets, weights, seed=42, max_samples=None):
+        assert len(sub_datasets) == len(weights) and len(sub_datasets) > 0
+        self.sub_datasets = list(sub_datasets)
+        weights = np.asarray(weights, dtype=np.float64)
+        assert (weights >= 0).all() and weights.sum() > 0, "weights must be non-negative and sum > 0"
+        self.weights = weights / weights.sum()
+        self.seed = seed
+        self.max_samples = max_samples
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        global_worker_id = rank * num_workers + worker_id
+        rng = np.random.default_rng(self.seed + 9973 * global_worker_id)
+
+        # Local mutable copy so we can zero out exhausted (or empty-on-this-worker) sources
+        weights = self.weights.copy()
+        iters = [iter(d) for d in self.sub_datasets]
+        n = len(iters)
+
+        samples_yielded = 0
+        while True:
+            if self.max_samples is not None and samples_yielded >= self.max_samples:
+                return
+            if weights.sum() == 0:
+                return
+            i = int(rng.choice(n, p=weights / weights.sum()))
+            try:
+                chunk = next(iters[i])
+            except StopIteration:
+                # Restart this source for the next epoch on this worker
+                iters[i] = iter(self.sub_datasets[i])
+                try:
+                    chunk = next(iters[i])
+                except StopIteration:
+                    # Source has zero chunks for this worker — drop it from the mixture
+                    weights[i] = 0
+                    continue
+            yield chunk
+            samples_yielded += 1
+
+
+def _build_dataset(subset_dirs, weights, file_name, seq_len, seed, shuffle, max_samples):
+    """Return one MemmapByteDataset for a single source, else a MultilingualByteDataset.
+
+    `max_samples` (per-worker cap) is applied at the mixture level when
+    multiple sources are present, otherwise at the sub-dataset.
+    """
+    if len(subset_dirs) == 1:
+        return MemmapByteDataset(
+            bin_path=subset_dirs[0] / file_name,
+            seq_len=seq_len,
+            seed=seed,
+            shuffle=shuffle,
+            max_samples=max_samples,
+        )
+    sub_datasets = [
+        MemmapByteDataset(
+            bin_path=d / file_name,
+            seq_len=seq_len,
+            seed=seed,
+            shuffle=shuffle,
+            max_samples=None,  # cap at the mixture level instead
+        )
+        for d in subset_dirs
+    ]
+    return MultilingualByteDataset(
+        sub_datasets=sub_datasets,
+        weights=weights,
+        seed=seed,
+        max_samples=max_samples,
+    )
+
+
+def create_dataloaders(data_dir, dataset_config, dataset_mixture,
+                       seq_len, seed, val_batches, batch_size, num_workers):
     """Create train and validation DataLoaders from config.
 
-    Looks for pre-tokenized binary files at:
-        <data_dir>/fineweb-edu-<data_subset>/train.bin   (e.g. data_subset="sample-10BT")
-        <data_dir>/fineweb-edu-<data_subset>/val.bin
+    Single-source mode (dataset_mixture is None / empty): looks for pre-tokenized
+    binary files at <data_dir>/<resolved>/{train,val}.bin, where <resolved> is:
+        - <data_subset>                   for prefixes the-stack-v2-smol,
+                                          starcoderdata, fineweb-2, hplt
+        - fineweb-edu-<data_subset>       otherwise (e.g. "sample-10BT")
 
-    For the Chinese dataset use data_subset="chinese-<score_range>", e.g. "chinese-3_4",
-    which resolves to <data_dir>/fineweb-edu-chinese-3_4/{train,val}.bin.
+    Mixture mode: dataset_mixture is a list of dicts, e.g.
+        [{name: hplt-eng_Latn, weight: 0.75}, {name: hplt-nld_Latn, weight: 0.25}]
+    Each `name` is resolved with the same rules above. Weights are normalized
+    to 1. Train and val both use the same mixture so the reported val_loss is
+    directly comparable to train loss. Per-yield weighted sampling means batch
+    composition matches the weights in expectation.
 
-    For The Stack V2 Smol use data_subset="the-stack-v2-smol",
-    which resolves to <data_dir>/the-stack-v2-smol/{train,val}.bin.
-
-    For FineWeb-2 use data_subset="fineweb-2-<lang>", e.g. "fineweb-2-kor_Hang",
-    which resolves to <data_dir>/fineweb-2-kor_Hang/{train,val}.bin.
-
-    Run scripts/prepare_data.py once to generate them.
+    Run scripts/prepare_data.py once per source to generate the .bin files.
     """
-    # Datasets that don't use the fineweb-edu- prefix
-    if data_subset.startswith(("the-stack-v2-smol", "starcoderdata", "fineweb-2")):
-        subset_dir = data_dir / data_subset
+    if dataset_mixture:
+        sources = [(s["name"], float(s["weight"])) for s in dataset_mixture]
     else:
-        subset_dir = data_dir / f"fineweb-edu-{data_subset}"
+        sources = [(dataset_config, 1.0)]
 
-    train_bin = subset_dir / "train.bin"
-    val_bin = subset_dir / "val.bin"
+    subset_names, weights = zip(*sources)
+    subset_dirs = [_resolve_subset_dir(data_dir, name) for name in subset_names]
 
-    for p in (train_bin, val_bin):
-        if not p.exists():
-            raise FileNotFoundError(
-                f"{p} not found. Run scripts/prepare_data.py first:\n"
-                f"  python scripts/prepare_data.py --data-dir {data_dir} --subset {data_subset}"
-            )
+    for subset, d in zip(subset_names, subset_dirs):
+        for fname in ("train.bin", "val.bin"):
+            p = d / fname
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"{p} not found. Run scripts/prepare_data.py first:\n"
+                    f"  python scripts/prepare_data.py --data-dir {data_dir} --subset {subset}"
+                )
 
-    train_dataset = MemmapByteDataset(
-        bin_path=train_bin,
-        seq_len=seq_len,
-        seed=seed,
-        shuffle=True,
+    train_dataset = _build_dataset(
+        subset_dirs, weights, "train.bin",
+        seq_len=seq_len, seed=seed, shuffle=True, max_samples=None,
     )
-    val_dataset = MemmapByteDataset(
-        bin_path=val_bin,
-        seq_len=seq_len,
-        seed=seed,
-        shuffle=False,
+    val_dataset = _build_dataset(
+        subset_dirs, weights, "val.bin",
+        seq_len=seq_len, seed=seed, shuffle=False,
         max_samples=val_batches * batch_size,
     )
 

@@ -540,6 +540,7 @@ def main():
     dataloader, val_dataloader = create_dataloaders(
         Path(cfg.data_dir),
         cfg.get("dataset_config", "sample-10BT"),
+        cfg.get("dataset_mixture", None),
         cfg.seq_len,
         cfg.seed,
         cfg.get("val_batches", 50),

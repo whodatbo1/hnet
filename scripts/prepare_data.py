@@ -62,6 +62,15 @@ Usage:
         --val-fraction 0.005 \\
         --seed 42 \\
         --num-workers 24
+
+    # HPLT v3.0 (any language — run download_data.py first)
+    python -u scripts/prepare_data.py \\
+        --dataset hplt \\
+        --subset nld_Latn \\
+        --data-dir /scratch-shared/mivanov1/hnet/data \\
+        --val-fraction 0.005 \\
+        --seed 42 \\
+        --num-workers 24
 """
 
 import argparse
@@ -169,6 +178,11 @@ def prepare(data_dir: str, subset: str, val_fraction: float, seed: int, num_work
         repo_path = f"data/{subset}/train"
         dir_name = f"fineweb-2-{subset}"
         text_column = "text"
+    elif dataset == "hplt":
+        # download_data.py writes parquet shards under <subset>/ (e.g. nld_Latn/shard-NNNNN.parquet)
+        repo_path = subset
+        dir_name = f"hplt-{subset}"
+        text_column = "text"
     else:
         # English: "sample-10BT" -> "sample/10BT"
         repo_path = subset.replace("-", "/")
@@ -184,7 +198,7 @@ def prepare(data_dir: str, subset: str, val_fraction: float, seed: int, num_work
     # expensive Arrow save_to_disk step.  Instead, compute shuffled train/val
     # index arrays (cheap — just ints) and have each worker read directly from
     # the parquet-backed HF dataset.
-    use_fast_path = dataset in ("starcoderdata", "the-stack-v2-smol", "fineweb-edu-chinese", "fineweb-2", "fineweb-edu")
+    use_fast_path = dataset in ("starcoderdata", "the-stack-v2-smol", "fineweb-edu-chinese", "fineweb-2", "fineweb-edu", "hplt")
 
     if use_fast_path:
         _prepare_fast(parquet_dir, output_dir, tmp_dir, text_column,
@@ -302,7 +316,8 @@ def _concat_shards(shard_files, outfile, n_shards):
 def main():
     parser = argparse.ArgumentParser(description="Pre-tokenize FineWeb-Edu to binary")
     parser.add_argument("--dataset", default="fineweb-edu",
-                        choices=["fineweb-edu", "fineweb-edu-chinese", "fineweb-2", "the-stack-v2-smol", "starcoderdata"],
+                        choices=["fineweb-edu", "fineweb-edu-chinese", "fineweb-2", "hplt",
+                                 "the-stack-v2-smol", "starcoderdata"],
                         help="Dataset to prepare (default: fineweb-edu)")
     parser.add_argument("--data-dir", default="/scratch-shared/mivanov1/hnet/data")
     parser.add_argument("--subset", default=None,
