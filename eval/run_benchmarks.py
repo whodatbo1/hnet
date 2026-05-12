@@ -69,6 +69,23 @@ OLMES_BENCHMARKS = {
 OLMES_CF_METRICS = ["acc", "acc_norm", "acc_bytes"]
 OLMES_HEADLINE_CF_METRIC = "acc_bytes"
 
+# EU20 (Thellmann et al. 2410.08928) — translated benchmarks for European languages.
+# Each entry maps logical_benchmark -> {formulation -> task_template}.
+# `{lang}` is filled in with the lowercased language code at expansion time.
+# GSM8K is generative (single formulation); TruthfulQA mc2 is CF-only because
+# it scores sum-of-correct-prob over a variable-length set.
+EU20_LANGUAGES = ["EN", "NL", "FI", "BG"]
+EU20_BENCHMARKS = {
+    "arc_challenge":   {"cf": "eu20_arc_challenge_{lang}_cf",
+                        "mcf": "eu20_arc_challenge_{lang}_mcf"},
+    "hellaswag":       {"cf": "eu20_hellaswag_{lang}_cf",
+                        "mcf": "eu20_hellaswag_{lang}_mcf"},
+    "truthfulqa_mc1":  {"cf": "eu20_truthfulqa_mc1_{lang}_cf",
+                        "mcf": "eu20_truthfulqa_mc1_{lang}_mcf"},
+    "truthfulqa_mc2":  {"cf": "eu20_truthfulqa_mc2_{lang}_cf"},
+    "gsm8k":           {"gen": "eu20_gsm8k_{lang}"},
+}
+
 
 def _lookup_metric(task_results, metric):
     """lm-eval stores metric keys with ',<filter>' suffixes; match by prefix."""
@@ -261,21 +278,36 @@ def run_eval(args):
             print(f"  Hooked {n} stage(s) to zero original dims.")
 
     olmes_mode = args.olmes
-    if olmes_mode and args.paper:
-        raise SystemExit("Pass at most one of --olmes / --paper.")
+    eu20_mode = args.eu20
+    mode_count = sum([olmes_mode, eu20_mode, args.paper])
+    if mode_count > 1:
+        raise SystemExit("Pass at most one of --olmes / --eu20 / --paper.")
 
     num_fewshot = args.num_fewshot
     if num_fewshot is None:
-        num_fewshot = 5 if olmes_mode else 0
+        if olmes_mode:
+            num_fewshot = 5
+        elif eu20_mode:
+            num_fewshot = None  # let each yaml decide (mc1/mc2 are 0-shot, gsm8k is 5-shot, ARC/HellaSwag use first_n from train)
+        else:
+            num_fewshot = 0
 
-    task_manager = None
+    # Build TaskManager with whichever include_paths are needed.
+    include_paths = []
     if olmes_mode:
         if not os.path.isdir(args.olmes_tasks_dir):
-            raise SystemExit(
-                f"OLMES tasks dir not found: {args.olmes_tasks_dir}"
-            )
+            raise SystemExit(f"OLMES tasks dir not found: {args.olmes_tasks_dir}")
+        include_paths.append(args.olmes_tasks_dir)
+    if eu20_mode:
+        if not os.path.isdir(args.eu20_tasks_dir):
+            raise SystemExit(f"EU20 tasks dir not found: {args.eu20_tasks_dir}")
+        include_paths.append(args.eu20_tasks_dir)
+
+    task_manager = None
+    if include_paths:
         task_manager = TaskManager(
-            include_path=args.olmes_tasks_dir, include_defaults=True
+            include_path=include_paths if len(include_paths) > 1 else include_paths[0],
+            include_defaults=True,
         )
 
     if args.tasks:
@@ -287,6 +319,18 @@ def run_eval(args):
                 tasks.append(ids["cf"])
             if args.formulation in ("mcf", "both"):
                 tasks.append(ids["mcf"])
+    elif eu20_mode:
+        langs = args.eu20_langs.split(",") if args.eu20_langs else EU20_LANGUAGES
+        tasks = []
+        for lang in langs:
+            ll = lang.lower()
+            for logical, formulations in EU20_BENCHMARKS.items():
+                for form, template in formulations.items():
+                    if form == "cf" and args.formulation == "mcf":
+                        continue
+                    if form == "mcf" and args.formulation == "cf":
+                        continue
+                    tasks.append(template.format(lang=ll))
     else:
         tasks = list(PAPER_BENCHMARKS.keys())
 
@@ -312,10 +356,14 @@ def run_eval(args):
     print("RESULTS")
     print("=" * 80)
 
+    olmes_summary = None
+    eu20_summary = None
     if olmes_mode:
         olmes_summary = _print_olmes_table(results, args.formulation)
+    elif eu20_mode:
+        langs = args.eu20_langs.split(",") if args.eu20_langs else EU20_LANGUAGES
+        eu20_summary = _print_eu20_table(results, langs, args.formulation)
     else:
-        olmes_summary = None
         _print_paper_table(results, tasks)
 
     # Save results
@@ -323,10 +371,22 @@ def run_eval(args):
         os.makedirs(args.output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = os.path.splitext(os.path.basename(args.config_path))[0]
-        suffix = "olmes" if olmes_mode else "paper"
+        if olmes_mode:
+            suffix = "olmes"
+        elif eu20_mode:
+            suffix = "eu20"
+        else:
+            suffix = "paper"
         output_path = os.path.join(
             args.output_dir, f"{model_name}_{suffix}_{timestamp}.json"
         )
+
+        if olmes_mode:
+            mode_label = "olmes"
+        elif eu20_mode:
+            mode_label = "eu20"
+        else:
+            mode_label = "paper"
 
         output = {
             "model_path": args.model_path,
@@ -336,9 +396,10 @@ def run_eval(args):
             "batch_size": args.batch_size,
             "max_length": args.max_length,
             "timestamp": timestamp,
-            "mode": "olmes" if olmes_mode else "paper",
-            "formulation": args.formulation if olmes_mode else None,
+            "mode": mode_label,
+            "formulation": args.formulation if (olmes_mode or eu20_mode) else None,
             "olmes_summary": olmes_summary,
+            "eu20_summary": eu20_summary,
             "results": results["results"],
         }
 
@@ -435,6 +496,61 @@ def _print_olmes_table(results, formulation):
         print("-" * len(cols))
         print(f"{'Average (max)':<55}{avg * 100:>8.1f}%")
     print("=" * len(cols))
+    return summary
+
+
+def _print_eu20_table(results, langs, formulation):
+    """Per (language, benchmark) print headline metric. CF: acc_bytes (or
+    acc_norm/acc fallback); MCF: acc; GSM8K: exact_match.
+    """
+    benchmarks = list(EU20_BENCHMARKS.keys())
+
+    def _cf_headline(task_id):
+        r = results["results"].get(task_id) or {}
+        for m in ("acc_bytes", "acc_norm", "acc"):
+            v = _lookup_metric(r, m)
+            if v is not None:
+                return v
+        return None
+
+    def _mcf_headline(task_id):
+        r = results["results"].get(task_id) or {}
+        return _lookup_metric(r, "acc")
+
+    def _gen_headline(task_id):
+        r = results["results"].get(task_id) or {}
+        return _lookup_metric(r, "exact_match")
+
+    show_cf = formulation in ("cf", "both")
+    show_mcf = formulation in ("mcf", "both")
+    cols_per_bench = []  # (logical_name, formulation_key, getter)
+    for logical in benchmarks:
+        forms = EU20_BENCHMARKS[logical]
+        if "gen" in forms:
+            cols_per_bench.append((logical, "gen", _gen_headline))
+            continue
+        if show_cf and "cf" in forms:
+            cols_per_bench.append((logical, "cf", _cf_headline))
+        if show_mcf and "mcf" in forms:
+            cols_per_bench.append((logical, "mcf", _mcf_headline))
+
+    header = f"{'lang':<6}" + "".join(f"{f'{l[:11]}.{f}':>16}" for l, f, _ in cols_per_bench)
+    print(header)
+    print("-" * len(header))
+
+    summary = {}
+    for lang in langs:
+        ll = lang.lower()
+        summary[lang] = {}
+        row = f"{lang:<6}"
+        for logical, form, getter in cols_per_bench:
+            template = EU20_BENCHMARKS[logical][form]
+            task_id = template.format(lang=ll)
+            v = getter(task_id)
+            summary[lang].setdefault(logical, {})[form] = v
+            row += (f"{v * 100:>15.1f}%" if v is not None else f"{'-':>16}")
+        print(row)
+    print("=" * len(header))
     return summary
 
 
@@ -537,6 +653,30 @@ def main():
         type=str,
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "olmes_tasks"),
         help="Directory containing OLMES task YAML files (used with --olmes).",
+    )
+    parser.add_argument(
+        "--eu20",
+        action="store_true",
+        help=(
+            "Run the EU20 multilingual benchmark suite (Thellmann et al. 2410.08928): "
+            "ARC-Challenge, HellaSwag, TruthfulQA mc1+mc2, GSM8K across "
+            f"{', '.join(EU20_LANGUAGES)}. Restrict languages with --eu20-langs."
+        ),
+    )
+    parser.add_argument(
+        "--eu20-langs",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated subset of EU20 languages to run (default: all configured). "
+            f"Available: {', '.join(EU20_LANGUAGES)}."
+        ),
+    )
+    parser.add_argument(
+        "--eu20-tasks-dir",
+        type=str,
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "eu20_tasks"),
+        help="Directory containing EU20 task YAML files (used with --eu20).",
     )
 
     args = parser.parse_args()

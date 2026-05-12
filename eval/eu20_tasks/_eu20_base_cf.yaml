@@ -1,0 +1,18 @@
+# EU20 cloze formulation (CF / RC) base.
+# Mirrors _olmes_base_cf.yaml: report acc, acc_norm, and acc_bytes (the latter
+# is the headline CF metric under HNet's byte tokenizer, equivalent to OLMES
+# acc_per_char on ASCII text).
+output_type: multiple_choice
+target_delimiter: " "
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_norm
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_bytes
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 0.1
