@@ -196,6 +196,7 @@ cython_debug/
 checkpoints/
 wandb/
 viz_entropy/
+viz_boundaries/
 eval/results
 jobs/
 compression/results/
