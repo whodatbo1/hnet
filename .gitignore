@@ -202,4 +202,6 @@ jobs/
 compression/results/
 compression/enwik*
 
+.euroeval_cache
+
 .vscode/

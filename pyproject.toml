@@ -22,8 +22,17 @@ dependencies = [
     "datasets",
     "lm-eval",
     "matplotlib",
-    "boto3"
+    "boto3",
+    "fastapi",
+    "uvicorn",
+    "httpx",
 ]
+
+# NOTE: EuroEval is intentionally NOT a dependency of this package (neither
+# main nor extras). It cannot coexist with flash_attn in the same Python env,
+# and flash_attn is required by the H-Net core above. Install euroeval in a
+# SEPARATE env -- see requirements-euroeval.txt and eval/run_euroeval.py.
+
 [project.urls]
 Repository = "https://github.com/goombalab/hnet"
 

@@ -1,0 +1,11 @@
+# Dependencies for eval/run_euroeval.py (the EuroEval-side driver).
+# Install these in a SEPARATE env from the hnet env -- euroeval refuses
+# to import when flash_attn is present, and flash_attn is required by
+# the H-Net core.
+#
+#   conda create -n euroeval python=3.12 -y
+#   conda activate euroeval
+#   pip install -r requirements-euroeval.txt
+#
+euroeval
+httpx
