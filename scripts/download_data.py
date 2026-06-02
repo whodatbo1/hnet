@@ -138,11 +138,12 @@ def download_hplt(output_dir: str, subset: str = "nld_Latn",
     """Download a fixed-byte slice of HPLT v3.0 for one language.
 
     HPLT v3.0 (https://hplt-project.org/datasets/v3.0) ships per-language
-    `.jsonl.zst` shards on data.hplt-project.org, sorted by document quality.
-    A `.map` index lists shards in priority order: top-quality bin (`10_*`)
-    first, followed by `5_*`–`9_*` shards.
+    `.jsonl.zst` shards on data.hplt-project.org, named `<bin>_<idx>.jsonl.zst`
+    where `bin` is a quality score (10 = best, 5 = lowest). The `.map` index
+    lists the shards in lexicographic order (`10_*`, `5_*`, `6_*`, ... `9_*`),
+    which is NOT quality order, so we re-sort by quality bin below.
 
-    This function streams shards in that order, decompresses on the fly,
+    This function streams shards best-quality-first, decompresses on the fly,
     extracts the `text` field from each JSON document, and writes parquet
     shards (`text` column only) until ``target_bytes`` of UTF-8 text has
     been written. Critical for large languages (e.g. eng_Latn, cmn_Hans)
@@ -178,6 +179,21 @@ def download_hplt(output_dir: str, subset: str = "nld_Latn",
     print(f"Fetching shard list from {map_url}")
     with urllib.request.urlopen(map_url, timeout=60) as r:
         shard_urls = [line.decode().strip() for line in r if line.strip()]
+
+    # The .map lists shards lexicographically (10_*, 5_*, 6_*, ... 9_*), which
+    # is NOT quality order: after the top 10_* bin it drops to the lowest 5_*
+    # bin. Re-sort by quality bin descending (then shard index ascending) so a
+    # fixed-byte slice keeps the highest-quality documents.
+    def _quality_key(url: str):
+        name = url.rsplit("/", 1)[-1].split(".", 1)[0]  # ".../10_1.jsonl.zst" -> "10_1"
+        try:
+            quality, idx = (int(p) for p in name.split("_"))
+        except ValueError:
+            return (1, 0)  # unrecognised name -> sort last
+        return (-quality, idx)
+
+    shard_urls.sort(key=_quality_key)
+
     print(f"Found {len(shard_urls)} shards. "
           f"Targeting {target_bytes / 1e9:.2f} GB of text into {parquet_dir}")
 
