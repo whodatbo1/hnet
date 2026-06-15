@@ -116,6 +116,14 @@ def main():
                              "LM (raw /v1/completions prompt) or instruction-tuned "
                              "(/v1/chat/completions with messages). H-Net is a base LM, "
                              "so the default is 'base'.")
+    parser.add_argument("--cloze-scoring", dest="cloze_scoring",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="For sequence-classification and multiple-choice tasks, "
+                             "skip free-form generation and instead score each candidate "
+                             "label as a continuation via /v1/loglikelihood, picking the "
+                             "highest sum-logprob. Sidesteps EuroEval's first-token "
+                             "prefix-match which is broken for byte-level models with "
+                             "multi-byte (e.g. Cyrillic) labels. Default: on.")
     args = parser.parse_args()
 
     api_base = args.api_base or f"http://{args.host}:{args.port}/v1"
@@ -170,6 +178,85 @@ def main():
                 TextChoices._euroeval_message_patch = True
                 print("[run_euroeval] Patched TextChoices.message for BASE-LM path.",
                       flush=True)
+
+        if args.cloze_scoring:
+            # Replace LiteLLMModel.generate with a continuation-cloze scorer for
+            # sequence-classification and multiple-choice tasks: score each
+            # candidate label as a continuation of the prompt via
+            # /v1/loglikelihood and pick the highest-logprob one. Sidesteps
+            # EuroEval's first-token prefix-match (broken for byte-level models
+            # with multi-byte / shared-prefix labels). Other task groups
+            # (TEXT_TO_TEXT, NER, QA, SPEED) fall through to the original method.
+            from euroeval.benchmark_modules.litellm import LiteLLMModel
+            from euroeval.enums import TaskGroup
+            from euroeval.data_models import GenerativeModelOutput
+
+            _CLOZE_TASK_GROUPS = {
+                TaskGroup.SEQUENCE_CLASSIFICATION,
+                TaskGroup.MULTIPLE_CHOICE_CLASSIFICATION,
+            }
+            _orig_litellm_generate = LiteLLMModel.generate
+            _cloze_base = api_base.rstrip("/")
+
+            def _flatten_messages(msgs):
+                # Match the server's chat-completions flattening: concatenate
+                # `content` fields with newlines.
+                return "\n".join(m.get("content", "") for m in msgs if isinstance(m, dict))
+
+            def _cloze_generate(self, inputs):
+                tg = getattr(self.dataset_config.task, "task_group", None)
+                if tg not in _CLOZE_TASK_GROUPS:
+                    return _orig_litellm_generate(self, inputs)
+
+                if "text" in inputs:
+                    prompts = list(inputs["text"])
+                elif "messages" in inputs:
+                    prompts = [_flatten_messages(m) for m in inputs["messages"]]
+                else:
+                    return _orig_litellm_generate(self, inputs)
+
+                local_labels = [
+                    self.dataset_config.prompt_label_mapping[label].strip()
+                    for label in self.dataset_config.labels
+                ]
+                if not local_labels:
+                    return _orig_litellm_generate(self, inputs)
+
+                sequences: list = []
+                failed: list = []
+                with httpx.Client(timeout=120.0) as client:
+                    for i, prompt in enumerate(prompts):
+                        try:
+                            r = client.post(
+                                f"{_cloze_base}/loglikelihood",
+                                json={"prompt": prompt, "continuations": local_labels},
+                            )
+                            r.raise_for_status()
+                            data = r.json()["data"]
+                        except Exception as e:
+                            failed.append({
+                                "sample_index": i,
+                                "error": f"loglikelihood call failed: {e!r}",
+                            })
+                            sequences.append("")
+                            continue
+                        best = max(data, key=lambda d: d["logprob"])
+                        sequences.append(best["continuation"])
+
+                # scores=None forces EuroEval's label extractor to skip the
+                # first-token logprob path and use prefix-match on `sequences`,
+                # which will find our exact-label string unambiguously.
+                return GenerativeModelOutput(
+                    sequences=sequences, scores=None, failed_instances=failed,
+                )
+
+            LiteLLMModel.generate = _cloze_generate
+            print(
+                "[run_euroeval] Cloze scoring ON for "
+                f"{{{', '.join(t.name for t in _CLOZE_TASK_GROUPS)}}} tasks "
+                f"(via {_cloze_base}/loglikelihood).",
+                flush=True,
+            )
 
         # Redirect the per-batch model-outputs JSON that --debug writes:
         # default location is CWD with name "<model_id>-<dataset>-model-outputs.json"

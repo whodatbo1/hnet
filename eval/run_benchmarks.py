@@ -37,7 +37,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import lm_eval
 from lm_eval.tasks import TaskManager
-from lm_eval_wrapper import HNetLM
+# Lazy import: HNetLM pulls in flash_attn (GPU-only). Importing this module
+# from a CPU-only context — e.g. to reuse the benchmark tables / printers
+# from run_benchmarks_hf.py — should not require a GPU.
 
 
 # Paper benchmarks: task_name -> metric_key (HNet paper Table 2 reproduction).
@@ -253,6 +255,8 @@ def _print_one_sample(idx, sample, hnet_lm, ctx_max_chars=1000):
 
 
 def run_eval(args):
+    from lm_eval_wrapper import HNetLM  # lazy: pulls in flash_attn / GPU
+
     print(f"Loading model from {args.model_path}...")
     model = HNetLM(
         model_path=args.model_path,

@@ -1,0 +1,20 @@
+{
+  "model": "hnet_1stage_S_en_bul",
+  "model_path": "/scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_en_bul/latest.pt",
+  "config_path": "configs/comparison/S/hnet_1stage_S.json",
+  "src_lang": "eng_Latn",
+  "tgt_lang": "bul_Cyrl",
+  "direction": "English->Bulgarian",
+  "test_split": "devtest",
+  "shot_split": "dev",
+  "num_shots": 0,
+  "shot_ids": [],
+  "seed": 1234,
+  "n": 100,
+  "max_new_tokens": 512,
+  "run_id": "20260615_124657",
+  "metrics": {
+    "spbleu": 0.0655,
+    "chrf2": 0.6237
+  }
+}

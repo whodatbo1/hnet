@@ -2,7 +2,7 @@
 # Override any field via CLI: python train.py --config configs/train/default.yaml --lr 1e-3
 
 # --- Model ---
-model_config: configs/comparison/S/hnet_1stage_S_en.json
+model_config: configs/comparison/S/hnet_1stage_S.json
 
 # Per-stage LR multipliers (outer to inner). Set to null to disable.
 # Example for 2-stage: [3.0, 1.7, 0.9]
@@ -14,9 +14,10 @@ weight_decay: 0.1
 betas: [0.9, 0.95]
 max_grad_norm: 1.0
 
-# --- LR Schedule (Warmup-Stable-Decay) ---
-warmup_fraction: 0.01   # 10% linear warmup
-decay_fraction: 0.2     # 20% inverse-sqrt decay
+# --- LR Schedule ---
+lr_schedule: cosine     # Linear warmup + cosine decay to min_lr (matches Megatron Llama baseline)
+warmup_steps: 500       # Matches Megatron's LR_WARMUP_ITERS default
+min_lr: 4e-5            # Matches MIN_LR in the S_200M Llama configs
 
 # --- Loss ---
 alpha: 0.03                  # Load balancing loss weight
@@ -31,8 +32,8 @@ dataset_mixture: [
     name: hplt-eng_Latn,
     weight: 0.5
   },
-  {
-    name: hplt-bul_Cyrl,
+  { 
+    name: hplt-nld_Latn,
     weight: 0.5
   }
 ]
@@ -41,7 +42,7 @@ seed: 42
 
 # --- Batch ---
 batch_size: 16           # Micro batch size per GPU
-grad_accum_steps: 16      # Gradient accumulation steps
+grad_accum_steps: 16     # Gradient accumulation steps
 num_workers: 8           # Dataloader workers (can use >0 with local data)
 
 # --- Training ---
@@ -49,19 +50,19 @@ max_steps: null
 total_tokens: 17_200_000_000
 
 # --- Validation ---
-validate_every: 100       # Run validation every N steps (0 to disable)
+validate_every: 500       # Run validation every N steps (matches Megatron EVAL_INTERVAL)
 val_fraction: 0.005       # Fraction of streaming documents reserved for validation (0.5%)
-val_batches: 100          # Number of micro-batches per validation run
+val_batches: 1600         # Micro-batches per run; 1600 x 16 = 25,600 seqs (matches Megatron EVAL_ITERS=100 x GBS=256)
 
 # --- Checkpointing ---
-checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_en
-save_every: 1000
+checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_en_nld
+save_every: 500
 resume: true
 
 # --- Logging ---
 log_every: 20
 wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
-wandb_run_name: "train_hnet_1stage_S_en"
+wandb_run_name: "train_hnet_1stage_S_en_nld"
 
 # --- Memory ---
 activation_checkpointing: false

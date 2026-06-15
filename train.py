@@ -40,15 +40,14 @@ from hnet.utils.eval import bits_per_byte, compression_metrics
 from hnet.modules.dc import RoutingModule
 
 # Learning rate schedule: Warmup-Stable-Decay (WSD)
-def wsd_schedule(step, max_steps, warmup_fraction, decay_fraction, base_lr):
+def wsd_schedule(step, max_steps, warmup_steps, decay_fraction, base_lr):
     """WSD learning rate schedule with linear warmup, stable phase, and 1/sqrt decay."""
-    warmup_steps = int(max_steps * warmup_fraction)
     decay_steps = int(max_steps * decay_fraction)
     stable_end = max_steps - decay_steps
 
     if step < warmup_steps:
         # Linear warmup
-        return base_lr * (step + 1) / warmup_steps
+        return base_lr * (step + 1) / max(warmup_steps, 1)
     elif step < stable_end:
         # Stable phase
         return base_lr
@@ -57,6 +56,16 @@ def wsd_schedule(step, max_steps, warmup_fraction, decay_fraction, base_lr):
         decay_progress = (step - stable_end) / max(decay_steps, 1)
         return base_lr / math.sqrt(1.0 + decay_progress * 9.0)
         # At the end (decay_progress=1), LR = base_lr / sqrt(10) ~ 0.316 * base_lr
+
+
+# Learning rate schedule: linear warmup + cosine decay (Megatron/Llama style)
+def cosine_schedule(step, max_steps, warmup_steps, min_lr_ratio, base_lr):
+    """Linear warmup, then cosine decay from base_lr to min_lr_ratio * base_lr."""
+    if step < warmup_steps:
+        return base_lr * (step + 1) / max(warmup_steps, 1)
+    decay_progress = (step - warmup_steps) / max(max_steps - warmup_steps, 1)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+    return base_lr * (min_lr_ratio + (1.0 - min_lr_ratio) * coeff)
 
 def log_gradient_norms(model, distributed=False, device=None, prefix="grad_norm"):
     """Compute per-module gradient L2 norms, grouped by the first two name segments.
@@ -90,10 +99,27 @@ def log_gradient_norms(model, distributed=False, device=None, prefix="grad_norm"
 
 # Precompute LR per step
 def build_lr_schedule(cfg):
-    return {
-        step: wsd_schedule(step, cfg.max_steps, cfg.warmup_fraction, cfg.decay_fraction, 1.0)
-        for step in range(cfg.max_steps)
-    }
+    # warmup_steps (absolute) takes precedence over warmup_fraction
+    if cfg.get("warmup_steps") is not None:
+        warmup_steps = int(cfg.warmup_steps)
+    else:
+        warmup_steps = int(cfg.max_steps * cfg.warmup_fraction)
+
+    schedule = cfg.get("lr_schedule", "wsd")
+    if schedule == "wsd":
+        return {
+            step: wsd_schedule(step, cfg.max_steps, warmup_steps, cfg.decay_fraction, 1.0)
+            for step in range(cfg.max_steps)
+        }
+    elif schedule == "cosine":
+        # min_lr is absolute (like Megatron's --min-lr); defaults to 10% of peak
+        min_lr_ratio = cfg.get("min_lr", 0.1 * cfg.lr) / cfg.lr
+        return {
+            step: cosine_schedule(step, cfg.max_steps, warmup_steps, min_lr_ratio, 1.0)
+            for step in range(cfg.max_steps)
+        }
+    else:
+        raise ValueError(f"Unknown lr_schedule: {schedule!r} (expected 'wsd' or 'cosine')")
 
 # ---------------------------------------------------------------------------
 # Helpers

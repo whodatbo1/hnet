@@ -6,6 +6,8 @@ hosted OpenAI endpoint. Exposes:
     GET  /v1/models                 -> static model list
     POST /v1/completions            -> text-completion endpoint (primary path for base LMs)
     POST /v1/chat/completions       -> chat endpoint (concatenates messages as a base-LM prompt)
+    POST /v1/loglikelihood          -> non-standard: score candidate continuations of a prompt.
+                                       Used by EuroEval cloze-scoring mode for classification.
 
 Unsupported OpenAI features (response_format, tools, streaming) are rejected
 with HTTP 422 and an `unsupported_param` error body; LiteLLM translates that
@@ -378,6 +380,101 @@ async def chat_completions(request: Request):
             "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
         },
     }
+
+
+@torch.inference_mode()
+def _loglikelihood_impl(prompt: str, continuations: list) -> list:
+    """For each (prompt, continuation), compute sum_i log P(byte_i | prompt + cont[:i]).
+
+    Equivalent to lm-eval-harness' `loglikelihood` primitive but exposed as
+    HTTP so EuroEval can call it. Used to do continuation-cloze scoring of
+    classification/MCQ labels: score each candidate label as a continuation
+    and pick the one with the highest log-probability.
+
+    Returns a list of dicts {continuation, logprob, n_bytes, per_token_logprobs}
+    in the same order as the input.
+    """
+    prompt_ids = TOKENIZER.encode([prompt], add_bos=True)[0]["input_ids"].tolist()
+    cont_ids_list = [
+        TOKENIZER.encode([c], add_bos=False, add_eos=False)[0]["input_ids"].tolist()
+        for c in continuations
+    ]
+    if any(len(c) == 0 for c in cont_ids_list):
+        raise ValueError("All continuations must encode to >= 1 byte.")
+
+    # Left-truncate the prompt so prompt + longest-continuation fits in context.
+    # Preserve BOS at index 0 because dynamic chunking needs a boundary token.
+    max_cont = max(len(c) for c in cont_ids_list)
+    if len(prompt_ids) + max_cont > MAX_CONTEXT_LENGTH:
+        budget = MAX_CONTEXT_LENGTH - max_cont
+        budget = max(2, budget)
+        prompt_ids = [TOKENIZER.bos_idx] + prompt_ids[-(budget - 1):]
+
+    sequences = [prompt_ids + c for c in cont_ids_list]
+    max_len = max(len(s) for s in sequences)
+
+    # Pad with null bytes (vocab idx 0). Matches the padding scheme used by
+    # eval/lm_eval_wrapper.py:_loglikelihood_tokens — logits at padded positions
+    # are garbage but never read; we slice only the continuation region.
+    padded = torch.zeros(
+        (len(sequences), max_len), dtype=torch.long, device=DEVICE
+    )
+    for i, s in enumerate(sequences):
+        padded[i, : len(s)] = torch.tensor(s, dtype=torch.long, device=DEVICE)
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        output = MODEL(padded, mask=None)
+    logits = output.logits.float()  # (B, L, V)
+
+    results = []
+    prompt_len = len(prompt_ids)
+    for i, cont_ids in enumerate(cont_ids_list):
+        cont_len = len(cont_ids)
+        # Token at position t is predicted by logits at position t-1.
+        # Continuation tokens occupy positions [prompt_len .. prompt_len+cont_len-1],
+        # so we slice logits at [prompt_len-1 .. prompt_len+cont_len-1).
+        cont_logits = logits[i, prompt_len - 1 : prompt_len + cont_len - 1, :]
+        cont_tensor = torch.tensor(cont_ids, dtype=torch.long, device=DEVICE)
+        log_probs = F.log_softmax(cont_logits, dim=-1)
+        token_lp = log_probs.gather(
+            dim=-1, index=cont_tensor.unsqueeze(-1)
+        ).squeeze(-1)
+        total = float(token_lp.sum().item())
+        results.append({
+            "continuation": continuations[i],
+            "logprob": total,
+            "n_bytes": cont_len,
+            "per_byte_logprobs": [float(x) for x in token_lp.tolist()],
+        })
+    return results
+
+
+@app.post("/v1/loglikelihood")
+async def loglikelihood(request: Request):
+    body = await request.json()
+    prompt = body.get("prompt")
+    continuations = body.get("continuations") or []
+    if not isinstance(prompt, str) or not isinstance(continuations, list) or not continuations:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "message": "Need string 'prompt' and non-empty list 'continuations'.",
+                "type": "invalid_request_error",
+            }},
+        )
+    if not all(isinstance(c, str) and c for c in continuations):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "message": "All continuations must be non-empty strings.",
+                "type": "invalid_request_error",
+            }},
+        )
+    async with GEN_LOCK:
+        data = await asyncio.get_running_loop().run_in_executor(
+            None, _loglikelihood_impl, prompt, continuations,
+        )
+    return {"object": "loglikelihood", "model": MODEL_NAME, "data": data}
 
 
 def main():

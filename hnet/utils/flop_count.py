@@ -1,5 +1,9 @@
 """
-Forward-pass FLOP counter for HNet model configurations.
+FLOP counter for HNet model configurations.
+
+By default reports *training* FLOPs (forward + backward, ≈ 6N per token),
+matching the convention used by Megatron-LM, Chinchilla, and most scaling-law
+work. Pass --forward-only to get just the forward pass (≈ 2N per token).
 
 Uses analytical formulas from the H-Net paper:
 
@@ -169,8 +173,9 @@ def count_flops(
     seq_len: int,
     downsample_n: float = 4.0,
     ssm_headdim: int = 64,
+    training: bool = True,
 ) -> OrderedDict:
-    """Compute forward-pass FLOPs for an HNet config.
+    """Compute FLOPs for an HNet config.
 
     Args:
         config_path:  Path to the model JSON config file.
@@ -179,6 +184,10 @@ def count_flops(
                       E.g. 4 means the inner stage processes seq_len/4 tokens.
         ssm_headdim:  Mamba-2 SSM head dimension used to derive num_heads_ssm.
                       Default 64 matches the mamba_ssm library default.
+        training:     If True (default), report training FLOPs (fwd+bwd ≈ 6N/token)
+                      by scaling all forward FLOPs by 3 — the standard convention
+                      used by Megatron-LM and the Chinchilla scaling laws.
+                      If False, report only the forward pass (≈ 2N/token).
 
     Returns:
         OrderedDict mapping component name to a breakdown dict with keys
@@ -215,6 +224,13 @@ def count_flops(
     head_raw = 2.0 * seq_len * hnet_cfg.vocab_size * d_embed
     result["lm_head"] = {"attn": 0.0, "ssm": 0.0, "mlp": 0.0, "other": head_raw}
 
+    # Scale forward FLOPs to training (fwd + bwd ≈ 3 × fwd) if requested.
+    scale = 3.0 if training else 1.0
+    if scale != 1.0:
+        for breakdown in result.values():
+            for k in breakdown:
+                breakdown[k] *= scale
+
     # Compute per-component totals and grand total
     grand_total = 0.0
     for key, breakdown in result.items():
@@ -226,15 +242,26 @@ def count_flops(
     return result
 
 
-def print_flop_table(counts: OrderedDict, config_path: str = "", seq_len: int = 0) -> None:
-    """Print a formatted FLOP breakdown table."""
-    header = f"FLOPs for: {config_path}"
+def print_flop_table(
+    counts: OrderedDict,
+    config_path: str = "",
+    seq_len: int = 0,
+    training: bool = True,
+) -> None:
+    """Print a formatted FLOP breakdown table.
+
+    The 'F/byte (M)' column reports MFLOPs per input byte (component total
+    divided by the outermost-stage seq_len), the standard scaling-law unit
+    for byte-level H-Net comparisons.
+    """
+    mode = "training (fwd+bwd, ≈6N)" if training else "forward only (≈2N)"
+    header = f"FLOPs for: {config_path}  [{mode}]"
     if seq_len:
         header += f"  (seq_len={seq_len:,})"
     print(f"\n{header}")
-    W = 76
+    W = 110
     print("-" * W)
-    print(f"{'Component':<22}  {'Attn (G)':>10}  {'SSM (G)':>10}  {'MLP (G)':>10}  {'Other (G)':>10}  {'Total (G)':>10}  {'Share':>6}")
+    print(f"{'Component':<22}  {'Attn (G)':>10}  {'SSM (G)':>10}  {'MLP (G)':>10}  {'Other (G)':>10}  {'Total (G)':>10}  {'F/byte (M)':>12}  {'Share':>6}")
     print("-" * W)
 
     grand = counts["TOTAL"]["total"]
@@ -242,11 +269,20 @@ def print_flop_table(counts: OrderedDict, config_path: str = "", seq_len: int = 
     def _g(v):
         return f"{v / 1e9:>10.2f}" if v > 0 else f"{'—':>10}"
 
+    def _per_byte(total):
+        if seq_len <= 0:
+            return f"{'—':>12}"
+        return f"{total / seq_len / 1e6:>12.2f}"
+
     for component, breakdown in counts.items():
         if component == "TOTAL":
             print("-" * W)
-            total_g = breakdown["total"] / 1e9
-            print(f"{'TOTAL':<22}  {'':>10}  {'':>10}  {'':>10}  {'':>10}  {total_g:>10.2f}")
+            total    = breakdown["total"]
+            total_g  = total / 1e9
+            print(
+                f"{'TOTAL':<22}  {'':>10}  {'':>10}  {'':>10}  {'':>10}  "
+                f"{total_g:>10.2f}  {_per_byte(total)}"
+            )
             continue
         total  = breakdown["total"]
         share  = 100.0 * total / grand if grand > 0 else 0.0
@@ -256,13 +292,13 @@ def print_flop_table(counts: OrderedDict, config_path: str = "", seq_len: int = 
         other  = breakdown.get("other", 0.0)
         print(
             f"{component:<22}  {_g(attn)}  {_g(ssm)}  {_g(mlp)}  {_g(other)}  "
-            f"{total/1e9:>10.2f}  {share:>5.1f}%"
+            f"{total/1e9:>10.2f}  {_per_byte(total)}  {share:>5.1f}%"
         )
     print()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Count HNet forward-pass FLOPs by component")
+    parser = argparse.ArgumentParser(description="Count HNet FLOPs by component (default: training, fwd+bwd ≈ 6N)")
     parser.add_argument("--config",       type=str,   required=True,
                         help="Path to the model JSON config file")
     parser.add_argument("--seq-len",      type=int,   default=8192,
@@ -271,10 +307,13 @@ def main():
                         help="Expected token compression per routing stage (default: 4)")
     parser.add_argument("--ssm-headdim",  type=int,   default=64,
                         help="Mamba-2 SSM head dimension for num_heads_ssm derivation (default: 64)")
+    parser.add_argument("--forward-only", action="store_true",
+                        help="Report forward-pass FLOPs only (≈ 2N/token) instead of training (≈ 6N/token)")
     args = parser.parse_args()
 
-    counts = count_flops(args.config, args.seq_len, args.downsample_n, args.ssm_headdim)
-    print_flop_table(counts, args.config, args.seq_len)
+    training = not args.forward_only
+    counts = count_flops(args.config, args.seq_len, args.downsample_n, args.ssm_headdim, training=training)
+    print_flop_table(counts, args.config, args.seq_len, training=training)
 
 
 if __name__ == "__main__":
