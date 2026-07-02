@@ -200,6 +200,7 @@ viz_boundaries/
 eval/results
 jobs/
 compression/results/
+multilingual_translation/results/
 compression/enwik*
 
 .euroeval_cache

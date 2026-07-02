@@ -1,0 +1,77 @@
+# ALMA Stage 1: continual pretraining on monolingual data, warm-started from an
+# existing checkpoint (fresh optimizer + step 0, distinct from `resume: true`).
+#
+# NOTE: for the already-bilingual S base (trained 50/50 en+bg) this stage is
+# largely redundant — the value of ALMA Stage 1 is adding target-language
+# proficiency to an English-centric model. Use this config to (a) add another
+# language to the mixture, (b) train on more monolingual tokens, or (c) start
+# from an English-only H-Net. Otherwise skip straight to the SFT config.
+#
+# Launch:  python train.py --config configs/comparison/S/hnet_1stage_S_en_bul_cpt.yaml
+
+# --- Model (MUST match the init_from checkpoint's architecture) ---
+model_config: configs/comparison/S/hnet_1stage_S.json
+lr_multiplier: null
+
+# --- Warm-start (weights only; fresh optimizer + step 0) ---
+init_from: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_en_bul/latest.pt
+resume: false
+
+# --- Optimizer (re-warmed, lower than from-scratch pretraining) ---
+lr: 1e-4
+weight_decay: 0.1
+betas: [0.9, 0.95]
+max_grad_norm: 1.0
+
+# --- LR Schedule ---
+lr_schedule: cosine
+warmup_steps: 100
+min_lr: 1e-5
+
+# --- Loss ---
+alpha: 0.03
+ortho_reg_lambda: 0.0
+downsample_n: 4
+bm_loss_weight: 0.0
+
+# --- Data (monolingual mixture; add/adjust languages here) ---
+data_dir: /scratch-shared/mivanov1/hnet/data
+dataset_mixture: [
+  {
+    name: hplt-eng_Latn,
+    weight: 0.5
+  },
+  {
+    name: hplt-bul_Cyrl,
+    weight: 0.5
+  }
+]
+seq_len: 8192
+seed: 42
+
+# --- Batch ---
+batch_size: 16
+grad_accum_steps: 16
+num_workers: 8
+
+# --- Training (a few hundred M tokens of continual PT, not a full pretrain) ---
+max_steps: null
+total_tokens: 1_000_000_000
+
+# --- Validation ---
+validate_every: 500
+val_fraction: 0.005
+val_batches: 1600
+
+# --- Checkpointing (distinct dir; do NOT overwrite the base run) ---
+checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_en_bul_cpt
+save_every: 500
+
+# --- Logging ---
+log_every: 20
+wandb_project: "hnet"
+wandb_run_name: "cpt_hnet_1stage_S_en_bul"
+
+# --- Memory ---
+activation_checkpointing: false
+compile: false

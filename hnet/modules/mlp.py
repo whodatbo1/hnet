@@ -23,7 +23,7 @@ class SwiGLU(nn.Module):
             d_intermediate if d_intermediate is not None else int(8 * d_model / 3)
         )
         d_intermediate = (d_intermediate + multiple_of - 1) // multiple_of * multiple_of
-        print(f"{input_d_intermediate}, {d_intermediate}")
+        
         self.fc1 = nn.Linear(d_model, 2 * d_intermediate, bias=bias, **factory_kwargs)
         self.fc2 = nn.Linear(d_intermediate, d_model, bias=bias, **factory_kwargs)
 

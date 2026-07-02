@@ -47,92 +47,22 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from datasets import load_dataset
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate import load_from_pretrained
 from hnet.utils.byte_tokenizer import ByteTokenizer
-
-
-# FLORES+ language code ("<iso639-3>_<script>") -> English display name used in
-# the prompt. Covers the high/medium/low-resource languages most commonly used
-# in MMT-LLM-style studies. Unknown codes fall back to the title-cased ISO part
-# (with a warning), so the script still runs on any FLORES+ config.
-LANG_NAMES = {
-    "eng_Latn": "English",
-    "deu_Latn": "German",
-    "fra_Latn": "French",
-    "spa_Latn": "Spanish",
-    "por_Latn": "Portuguese",
-    "ita_Latn": "Italian",
-    "nld_Latn": "Dutch",
-    "ron_Latn": "Romanian",
-    "swe_Latn": "Swedish",
-    "dan_Latn": "Danish",
-    "nob_Latn": "Norwegian",
-    "fin_Latn": "Finnish",
-    "pol_Latn": "Polish",
-    "ces_Latn": "Czech",
-    "slk_Latn": "Slovak",
-    "slv_Latn": "Slovenian",
-    "hrv_Latn": "Croatian",
-    "hun_Latn": "Hungarian",
-    "ell_Grek": "Greek",
-    "bul_Cyrl": "Bulgarian",
-    "rus_Cyrl": "Russian",
-    "ukr_Cyrl": "Ukrainian",
-    "srp_Cyrl": "Serbian",
-    "tur_Latn": "Turkish",
-    "arb_Arab": "Arabic",
-    "heb_Hebr": "Hebrew",
-    "pes_Arab": "Persian",
-    "hin_Deva": "Hindi",
-    "ben_Beng": "Bengali",
-    "tam_Taml": "Tamil",
-    "tel_Telu": "Telugu",
-    "urd_Arab": "Urdu",
-    "zho_Hans": "Chinese",
-    "zho_Hant": "Traditional Chinese",
-    "jpn_Jpan": "Japanese",
-    "kor_Hang": "Korean",
-    "vie_Latn": "Vietnamese",
-    "tha_Thai": "Thai",
-    "ind_Latn": "Indonesian",
-    "zsm_Latn": "Malay",
-    "swh_Latn": "Swahili",
-    "isl_Latn": "Icelandic",
-    "est_Latn": "Estonian",
-    "lvs_Latn": "Latvian",
-    "lit_Latn": "Lithuanian",
-    "cat_Latn": "Catalan",
-    "eus_Latn": "Basque",
-    "glg_Latn": "Galician",
-}
-
-
-def lang_name(code: str) -> str:
-    if code in LANG_NAMES:
-        return LANG_NAMES[code]
-    iso = code.split("_")[0]
-    name = iso.capitalize()
-    print(
-        f"[warn] No display name for FLORES+ code '{code}'; "
-        f"using '{name}'. Add it to LANG_NAMES for a nicer prompt.",
-        flush=True,
-    )
-    return name
-
-
-def load_parallel(src_lang: str, tgt_lang: str, split: str) -> list[tuple[int, str, str]]:
-    """Return (id, src_text, tgt_text) triples aligned by FLORES+ sentence id."""
-    src_ds = load_dataset("openlanguagedata/flores_plus", src_lang, split=split)
-    tgt_ds = load_dataset("openlanguagedata/flores_plus", tgt_lang, split=split)
-    src_by_id = {int(r["id"]): r["text"] for r in src_ds}
-    tgt_by_id = {int(r["id"]): r["text"] for r in tgt_ds}
-    common = sorted(set(src_by_id) & set(tgt_by_id))
-    return [(i, src_by_id[i], tgt_by_id[i]) for i in common]
+# Language names, ALMA template, and FLORES+ loader live in a torch-free module
+# shared with scripts/prepare_sft_data.py so the eval and SFT prompts stay identical.
+from mt_common import (  # noqa: E402
+    ALMA_TEMPLATE,
+    LANG_NAMES,
+    build_alma_prompt,
+    lang_name,
+    load_parallel,
+)
 
 
 def build_prompt(
@@ -140,13 +70,17 @@ def build_prompt(
     src_text: str,
     src_name: str,
     tgt_name: str,
+    prompt_format: str = "mmt",
 ) -> str:
-    """MMT-LLM-style few-shot prompt: parallel `Lang: sentence` blocks.
+    """Build the prompt for one test sentence.
 
-    Each demonstration is two lines (`{src}: ...` / `{tgt}: ...`); blocks are
-    separated by a blank line; the final block leaves the target side open for
-    the model to complete on one line.
+    prompt_format="mmt"  -> MMT-LLM few-shot: parallel `Lang: sentence` blocks.
+        Each demonstration is two lines (`{src}: ...` / `{tgt}: ...`); blocks are
+        separated by a blank line; the final block leaves the target side open.
+    prompt_format="alma" -> ALMA zero-shot instruction template (shots ignored).
     """
+    if prompt_format == "alma":
+        return build_alma_prompt(src_text, src_name, tgt_name)
     blocks = [f"{src_name}: {s}\n{tgt_name}: {t}" for _, s, t in shots]
     blocks.append(f"{src_name}: {src_text}\n{tgt_name}:")
     return "\n\n".join(blocks)
@@ -262,7 +196,13 @@ def main():
                         help="FLORES+ target code, e.g. deu_Latn")
     parser.add_argument("--num-shots", type=int, default=5,
                         help="In-context demonstrations from the dev split "
-                             "(MMT-LLM uses 8; default 5).")
+                             "(MMT-LLM uses 8; default 5). Forced to 0 for "
+                             "--prompt-format alma.")
+    parser.add_argument("--prompt-format", default="mmt", choices=["mmt", "alma"],
+                        help="mmt: MMT-LLM few-shot parallel blocks (default). "
+                             "alma: ALMA zero-shot instruction template — use this "
+                             "to evaluate a model SFT'd with scripts/prepare_sft_data.py "
+                             "so the eval prompt matches the training prompt.")
     parser.add_argument("--test-split", default="devtest", choices=["dev", "devtest"],
                         help="Split to evaluate on (default: devtest).")
     parser.add_argument("--shot-split", default="dev", choices=["dev", "devtest"],
@@ -280,6 +220,11 @@ def main():
     parser.add_argument("--comet-batch-size", type=int, default=16)
     parser.add_argument("--output-dir", default="multilingual_translation/results")
     args = parser.parse_args()
+
+    if args.prompt_format == "alma" and args.num_shots != 0:
+        print(f"[warn] --prompt-format alma is zero-shot; forcing --num-shots 0 "
+              f"(was {args.num_shots}).", flush=True)
+        args.num_shots = 0
 
     if args.num_shots > 0 and args.shot_split == args.test_split:
         print(f"[warn] shot-split == test-split ({args.test_split}); demonstrations "
@@ -325,7 +270,8 @@ def main():
     hyps: list[str] = []
     with detail_path.open("w") as f:
         for sid, src_text, ref_text in tqdm(test, desc=pair_tag, unit="sent"):
-            prompt = build_prompt(shots, src_text, src_name, tgt_name)
+            prompt = build_prompt(shots, src_text, src_name, tgt_name,
+                                  prompt_format=args.prompt_format)
             raw = translate(
                 model, tokenizer, prompt,
                 args.max_new_tokens, args.max_context, device,
@@ -359,6 +305,7 @@ def main():
         "src_lang": args.src_lang,
         "tgt_lang": args.tgt_lang,
         "direction": f"{src_name}->{tgt_name}",
+        "prompt_format": args.prompt_format,
         "test_split": args.test_split,
         "shot_split": args.shot_split,
         "num_shots": len(shots),

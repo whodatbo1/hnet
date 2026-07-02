@@ -93,6 +93,14 @@ def main():
     parser.add_argument("--datasets", default=None,
                         help="Comma-separated EuroEval dataset names.")
     parser.add_argument("--output-dir", default="eval/results/euroeval")
+    parser.add_argument("--cache-dir", default=".euroeval_cache",
+                        help="EuroEval cache directory. Also where the HF "
+                             "`evaluate` metric lock files live. Concurrent runs "
+                             "(e.g. SLURM array tasks) MUST use distinct dirs: "
+                             "evaluate omits experiment_id, so they otherwise "
+                             "deadlock on a shared default_experiment-1-0.arrow "
+                             "lock ('another evaluation module instance is "
+                             "already using the local cache file').")
     parser.add_argument("--server-startup-timeout", type=float, default=300.0)
     parser.add_argument("--debug", action="store_true",
                         help="EuroEval debug mode: dumps every model output to "
@@ -317,6 +325,7 @@ def main():
             debug=args.debug,
             force=args.force,
             generative_type=gtype,
+            cache_dir=args.cache_dir,
         )
 
         run_kwargs: dict = {"model": args.model_name}
@@ -326,6 +335,8 @@ def main():
             run_kwargs["dataset"] = [d.strip() for d in args.datasets.split(",") if d.strip()]
         if args.languages:
             run_kwargs["language"] = [l.strip() for l in args.languages.split(",") if l.strip()]
+        # if args.cloze:
+        #     run_kwargs["use_bits_per_character"] = True
 
         print(f"Running Benchmarker.benchmark({run_kwargs})\n", flush=True)
         results = bench.benchmark(**run_kwargs)

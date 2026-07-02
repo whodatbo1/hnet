@@ -1,0 +1,72 @@
+{
+  "spell": {
+    "preamble": "",
+    "example_format": "{i}. Spell out the word {word}. Answer: {answer}",
+    "question_format": "5. Spell out the word {word}. Answer: "
+  },
+  "spell_inverse": {
+    "preamble": "",
+    "example_format": "Write the word {spelled}. Answer: {answer}",
+    "question_format": "Write the word {spelled}. Answer: "
+  },
+  "contains_char": {
+    "preamble": "",
+    "example_format": "Is there a {char} in {word}? Answer: {answer}",
+    "question_format": "Is there a {char} in {word}? Answer: "
+  },
+  "contains_word": {
+    "preamble": "",
+    "example_format": "Is there a {word} in {sentence}? Answer: {answer}",
+    "question_format": "Is there a {word} in {sentence}? Answer: "
+  },
+  "orth": {
+    "preamble": "",
+    "example_format": "Closer to {target}: {opt1} or {opt2}? Answer: {answer}",
+    "question_format": "Closer to {target}: {opt1} or {opt2}? Answer: "
+  },
+  "sem": {
+    "preamble": "",
+    "example_format": "More related to {target}: {opt1} or {opt2}? Answer: {answer}",
+    "question_format": "More related to {target}: {opt1} or {opt2}? Answer: "
+  },
+  "ins_char": {
+    "preamble": "",
+    "example_format": "Add {add} after every {after} in {word}. Answer: {answer}",
+    "question_format": "Add {add} after every {after} in {word}. Answer: "
+  },
+  "ins_word": {
+    "preamble": "",
+    "example_format": "Add {add} after every {after} in {sentence}. Answer: {answer}",
+    "question_format": "Add {add} after every {after} in {sentence}. Answer: "
+  },
+  "del_char": {
+    "preamble": "",
+    "example_format": "Delete every {char} in {word}. Answer: {answer}",
+    "question_format": "Delete every {char} in {word}. Answer: "
+  },
+  "del_word": {
+    "preamble": "",
+    "example_format": "Delete every {word} in {sentence}. Answer: {answer}",
+    "question_format": "Delete every {word} in {sentence}. Answer: "
+  },
+  "sub_char": {
+    "preamble": "",
+    "example_format": "Substitute {old} with {new} in {word}. Answer: {answer}",
+    "question_format": "Substitute {old} with {new} in {word}. Answer: "
+  },
+  "sub_word": {
+    "preamble": "",
+    "example_format": "Substitute {old} with {new} in {sentence}. Answer: {answer}",
+    "question_format": "Substitute {old} with {new} in {sentence}. Answer: "
+  },
+  "swap_char": {
+    "preamble": "",
+    "example_format": "Swap {first} and {second} in {word}. Answer: {answer}",
+    "question_format": "Swap {first} and {second} in {word}. Answer: "
+  },
+  "swap_word": {
+    "preamble": "",
+    "example_format": "Swap {first} and {second} in {sentence}. Answer: {answer}",
+    "question_format": "Swap {first} and {second} in {sentence}. Answer: "
+  }
+}

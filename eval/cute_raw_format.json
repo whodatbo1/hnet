@@ -1,0 +1,72 @@
+{
+  "spell": {
+    "preamble": "Spell out each word by putting a single space between every letter.",
+    "example_format": "Spell out the word {word}. Answer: {answer}",
+    "question_format": "Spell out the word {word}. Answer: "
+  },
+  "spell_inverse": {
+    "preamble": "Write each spelled-out word back as a normal word, without any spaces.",
+    "example_format": "Write the word {spelled}. Answer: {answer}",
+    "question_format": "Write the word {spelled}. Answer: "
+  },
+  "contains_char": {
+    "preamble": "Answer whether the given letter appears in the given word. Answer Yes or No.",
+    "example_format": "Is there a {char} in {word}? Answer: {answer}",
+    "question_format": "Is there a {char} in {word}? Answer: "
+  },
+  "contains_word": {
+    "preamble": "Answer whether the given word appears in the given sentence (case insensitive). Answer Yes or No.",
+    "example_format": "Is there a {word} in {sentence}? Answer: {answer}",
+    "question_format": "Is there a {word} in {sentence}? Answer: "
+  },
+  "orth": {
+    "preamble": "Pick which of the two candidate words is closer in spelling (Levenshtein edit distance) to the given word.",
+    "example_format": "Closer to {target}: {opt1} or {opt2}? Answer: {answer}",
+    "question_format": "Closer to {target}: {opt1} or {opt2}? Answer: "
+  },
+  "sem": {
+    "preamble": "Pick which of the two candidate words is more closely related in meaning to the given word.",
+    "example_format": "More related to {target}: {opt1} or {opt2}? Answer: {answer}",
+    "question_format": "More related to {target}: {opt1} or {opt2}? Answer: "
+  },
+  "ins_char": {
+    "preamble": "Insert the first letter immediately after every occurrence of the second letter in the given word.",
+    "example_format": "Add {add} after every {after} in {word}. Answer: {answer}",
+    "question_format": "Add {add} after every {after} in {word}. Answer: "
+  },
+  "ins_word": {
+    "preamble": "Insert the first word immediately after every occurrence of the second word in the given sentence.",
+    "example_format": "Add {add} after every {after} in {sentence}. Answer: {answer}",
+    "question_format": "Add {add} after every {after} in {sentence}. Answer: "
+  },
+  "del_char": {
+    "preamble": "Delete every occurrence of the given letter from the given word.",
+    "example_format": "Delete every {char} in {word}. Answer: {answer}",
+    "question_format": "Delete every {char} in {word}. Answer: "
+  },
+  "del_word": {
+    "preamble": "Delete every occurrence of the given word from the given sentence.",
+    "example_format": "Delete every {word} in {sentence}. Answer: {answer}",
+    "question_format": "Delete every {word} in {sentence}. Answer: "
+  },
+  "sub_char": {
+    "preamble": "Replace every occurrence of the first letter with the second letter in the given word.",
+    "example_format": "Substitute {old} with {new} in {word}. Answer: {answer}",
+    "question_format": "Substitute {old} with {new} in {word}. Answer: "
+  },
+  "sub_word": {
+    "preamble": "Replace every occurrence of the first word with the second word in the given sentence.",
+    "example_format": "Substitute {old} with {new} in {sentence}. Answer: {answer}",
+    "question_format": "Substitute {old} with {new} in {sentence}. Answer: "
+  },
+  "swap_char": {
+    "preamble": "Swap the positions of the two given letters in the given word.",
+    "example_format": "Swap {first} and {second} in {word}. Answer: {answer}",
+    "question_format": "Swap {first} and {second} in {word}. Answer: "
+  },
+  "swap_word": {
+    "preamble": "Swap the positions of the two given words in the given sentence.",
+    "example_format": "Swap {first} and {second} in {sentence}. Answer: {answer}",
+    "question_format": "Swap {first} and {second} in {sentence}. Answer: "
+  }
+}

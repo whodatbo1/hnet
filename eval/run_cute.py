@@ -17,10 +17,15 @@ The runner's `--dataset` / `--language` flags are generic, so if EXECUTE
 (or any same-schema dataset) gets published to HF later it can be plugged
 in without code changes.
 
-Each dataset row already contains a fully-formatted `prompt` (task
-description + 4-shot examples + the query ending with "Answer:") and a
-`answer` string. We greedy-decode until newline, strip wrapping quotes,
-and score against the gold.
+Each dataset row contains a fully-formatted `prompt` (task description +
+4-shot examples + the query) and an `answer` string. The prompt is fed to the
+model verbatim — control its formatting at dataset-build time (e.g. via
+`eval/make_cute_base.py`'s JSON template config, which can bake in an answer
+cue such as a trailing `Answer: "`).
+
+We greedy-decode, stopping at a newline or a `"` (CUTE answers never contain
+either). `parse_answer` then strips an echoed `Answer:` prefix and wrapping
+quotes before scoring against the gold.
 
 Beyond binary exact-match (which is harsh on small byte-level models) we
 also report:
@@ -46,6 +51,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -73,6 +79,45 @@ CUTE_CATEGORIES = {
         "ins_word", "del_word", "sub_word", "swap_word",
     ),
 }
+
+
+def load_dataset_with_retry(dataset: str, language: Optional[str],
+                            attempts: int = 5, base_delay: float = 15.0):
+    """Load a dataset, retrying on transient cache-download races.
+
+    If `dataset` is a local directory, every `*.jsonl` in it is loaded as a
+    split named after the file stem (the format emitted by
+    `eval/make_cute_base.py`). Otherwise it's treated as an HF Hub id.
+
+    When several runs share one HF cache (e.g. a SLURM job array all calling
+    `load_dataset` at once), one process can clean up the `.incomplete`
+    staging dir out from under another, yielding a spurious "Cannot find data
+    file" OSError. The losing process just needs to retry once the winner has
+    finished materializing the cache, so we back off and try again.
+    """
+    local = Path(dataset)
+    if local.is_dir():
+        data_files = {p.stem: str(p) for p in sorted(local.glob("*.jsonl"))}
+        if not data_files:
+            raise SystemExit(f"No *.jsonl files found in local dataset dir: {dataset}")
+        return load_dataset("json", data_files=data_files)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return (
+                load_dataset(dataset, language)
+                if language else load_dataset(dataset)
+            )
+        except (OSError, FileNotFoundError) as e:
+            if attempt == attempts:
+                raise
+            delay = base_delay * attempt
+            print(
+                f"  load_dataset failed (attempt {attempt}/{attempts}), likely a "
+                f"concurrent cache-download race; retrying in {delay:.0f}s.\n  {e}",
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def levenshtein(a: str, b: str) -> int:
@@ -103,21 +148,27 @@ def char_f1(pred: str, gold: str) -> float:
     return 2 * p * r / (p + r)
 
 
-def parse_answer(text: str) -> str:
-    """Take the first non-empty line; strip surrounding whitespace and quotes.
+# Strips a leading "Answer:" the model may echo (with optional opening quote).
+_ANSWER_PREFIX = re.compile(r'^\s*answer\s*:\s*"?\s*', re.IGNORECASE)
 
-    CUTE prompts end mid-quote (e.g. `Answer: " `) so the model's continuation
-    typically looks like ` t h e "\\n` — leading space, content, trailing close
-    quote. We strip leading/trailing quote chars independently rather than
-    requiring symmetric pairs.
+
+def parse_answer(text: str) -> str:
+    """Take the first non-empty line; drop an echoed `Answer:` prefix and quotes.
+
+    If the prompt baked in an answer cue, the model continues from inside the
+    answer quote, so its output looks like ` t h e "\\n` — leading space,
+    content, trailing close quote. If not, the model may also re-emit the
+    `Answer: "` prefix (e.g. ` Answer: " t h e "`). We strip that prefix and any
+    wrapping quote chars independently rather than requiring symmetric pairs.
     """
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
+        line = _ANSWER_PREFIX.sub("", line)
         line = line.strip('"\'').strip()
         return line
-    return text.strip().strip('"\'').strip()
+    return _ANSWER_PREFIX.sub("", text.strip()).strip('"\'').strip()
 
 
 @torch.no_grad()
@@ -129,11 +180,15 @@ def generate_answer(
     max_context: int,
     stop: list[str],
     device: torch.device,
-) -> str:
+) -> tuple[str, str]:
     """Greedy-decode at temperature 0 until a stop string or EOS.
 
     Mirrors `HNetLM.generate_until` (eval/lm_eval_wrapper.py:213-285) but
     inlined to avoid an lm-eval-harness dependency for this script.
+
+    Returns ``(text, raw_full)`` where ``text`` is truncated at the first
+    stop string and ``raw_full`` is the untruncated decode of every generated
+    token (useful for --debug).
     """
     enc = tokenizer.encode([prompt], add_bos=True)[0]["input_ids"].tolist()
     if len(enc) > max_context:
@@ -169,14 +224,15 @@ def generate_answer(
         logits = out.logits[0, -1, :]
 
     try:
-        text = tokenizer.decode(gen, errors="replace")
+        raw_full = tokenizer.decode(gen, errors="replace")
     except (UnicodeDecodeError, ValueError):
-        text = ""
+        raw_full = ""
+    text = raw_full
     for s in stop:
         if s in text:
             text = text[: text.index(s)]
             break
-    return text
+    return text, raw_full
 
 
 def evaluate_task(
@@ -188,21 +244,25 @@ def evaluate_task(
     max_context: int,
     limit: Optional[int],
     device: torch.device,
+    debug: bool = False,
 ) -> list[dict]:
     rows: list[dict] = []
+    # CUTE answers contain neither newlines nor quotes, so both are safe stops
+    # (the closing `"` matters when the prompt format quotes the answer).
+    stop = ["\n", '"']
     n = len(ds) if limit is None else min(limit, len(ds))
     for i in tqdm(range(n), desc=task_name, leave=False):
         ex = ds[i]
         prompt = ex["prompt"]
         gold = ex["answer"].strip()
-        raw = generate_answer(
+        raw, raw_full = generate_answer(
             model, tokenizer, prompt, max_new_tokens, max_context,
-            stop=["\n"], device=device,
+            stop=stop, device=device,
         )
         pred = parse_answer(raw)
         denom = max(len(pred), len(gold), 1)
         sim = 1.0 - levenshtein(pred, gold) / denom
-        rows.append({
+        row = {
             "task": task_name,
             "idx": i,
             "gold": gold,
@@ -211,7 +271,14 @@ def evaluate_task(
             "exact_match": pred == gold,
             "char_similarity": sim,
             "char_f1": char_f1(pred, gold),
-        })
+        }
+        if debug:
+            # Verbatim record: the exact prompt fed to the model and the
+            # untruncated decode of every generated token, before stop-string
+            # truncation (raw_output) and answer parsing (pred).
+            row["prompt"] = prompt
+            row["raw_output_full"] = raw_full
+        rows.append(row)
     return rows
 
 
@@ -258,6 +325,9 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--max-context", type=int, default=8192)
     parser.add_argument("--output-dir", default="eval/results/cute")
+    parser.add_argument("--debug", action="store_true",
+                        help="Also write a structured JSON file with the verbatim "
+                             "prompt and untruncated model response for every example.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -268,10 +338,7 @@ def main():
 
     print(f"Loading dataset {args.dataset}"
           + (f" (config={args.language})" if args.language else ""), flush=True)
-    ds_all = (
-        load_dataset(args.dataset, args.language)
-        if args.language else load_dataset(args.dataset)
-    )
+    ds_all = load_dataset_with_retry(args.dataset, args.language)
     available = list(ds_all.keys())
     print(f"Available splits: {available}", flush=True)
 
@@ -291,6 +358,7 @@ def main():
     lang_tag = f"_{args.language}" if args.language else ""
     detail_path = out_dir / f"cute_{args.model_name}{lang_tag}_{run_id}.jsonl"
     summary_path = out_dir / f"cute_{args.model_name}{lang_tag}_{run_id}_summary.json"
+    debug_path = out_dir / f"cute_{args.model_name}{lang_tag}_{run_id}_debug.json"
 
     summary = {
         "model": args.model_name,
@@ -304,15 +372,19 @@ def main():
         "tasks": {},
     }
 
+    debug_records: list[dict] = []
     print(f"\nRunning {len(tasks)} task(s) -> {detail_path}\n", flush=True)
     with detail_path.open("w") as f:
         for task in tasks:
             rows = evaluate_task(
                 model, tokenizer, ds_all[task], task,
                 args.max_new_tokens, args.max_context, args.limit, device,
+                debug=args.debug,
             )
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            if args.debug:
+                debug_records.extend(rows)
             agg = aggregate(rows)
             summary["tasks"][task] = agg
             print(
@@ -337,8 +409,23 @@ def main():
     with summary_path.open("w") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
+    if args.debug:
+        debug = {
+            "model": args.model_name,
+            "model_path": args.model_path,
+            "config_path": args.config_path,
+            "dataset": args.dataset,
+            "language": args.language,
+            "run_id": run_id,
+            "responses": debug_records,
+        }
+        with debug_path.open("w") as f:
+            json.dump(debug, f, indent=2, ensure_ascii=False)
+
     print(f"\nPer-example results: {detail_path}")
     print(f"Summary: {summary_path}")
+    if args.debug:
+        print(f"Debug responses ({len(debug_records)} examples): {debug_path}")
     if "macro_avg" in summary:
         m = summary["macro_avg"]
         print(

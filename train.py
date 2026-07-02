@@ -34,7 +34,7 @@ from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetConfig
 from hnet.modules.block import Block
-from hnet.utils.data import create_dataloaders
+from hnet.utils.data import create_dataloaders, create_sft_dataloaders
 from hnet.utils.train import load_balancing_loss, certainty_loss, group_params, orthogonality_regularization_soft, get_compression_ratio
 from hnet.utils.eval import bits_per_byte, compression_metrics
 from hnet.modules.dc import RoutingModule
@@ -216,6 +216,67 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
     return step, time_since_start
 
 
+def load_weights_only(model, init_from, device):
+    """Warm-start: load ONLY model weights from a checkpoint; fresh optimizer/step.
+
+    Used for continual pretraining and SFT initialization (cfg.init_from), as
+    opposed to cfg.resume (which also restores the optimizer state and step
+    counter to continue the same run). The LR schedule therefore restarts from
+    step 0 with the new run's max_steps.
+
+    `init_from` may be a checkpoint directory (resolves latest.pt -> model_step{N}.pt),
+    a path to a latest.pt pointer, or a direct model_step*.pt file. Mirrors
+    generate.load_from_pretrained's resolution.
+    """
+    init_from = str(init_from)
+    if os.path.isdir(init_from):
+        latest_path = os.path.join(init_from, "latest.pt")
+        if not os.path.exists(latest_path):
+            raise FileNotFoundError(f"init_from dir has no latest.pt: {init_from}")
+        step = torch.load(latest_path, map_location="cpu")["step"]
+        model_path = os.path.join(init_from, f"model_step{step}.pt")
+    elif os.path.basename(init_from) == "latest.pt":
+        step = torch.load(init_from, map_location="cpu")["step"]
+        model_path = os.path.join(os.path.dirname(init_from), f"model_step{step}.pt")
+    else:
+        model_path = init_from
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"init_from checkpoint not found: {model_path}")
+
+    if isinstance(model, FSDP):
+        from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+            state_dict = torch.load(model_path, map_location="cpu")
+            model.load_state_dict(state_dict)
+    else:
+        state_dict = torch.load(model_path, map_location=device)
+        model.load_state_dict(state_dict)
+
+    print_rank0(f"Warm-started model weights from {model_path} (fresh optimizer, step 0)")
+
+
+def split_batch(batch, sft):
+    """Derive (input_ids, targets_ce, targets_model) for one batch.
+
+    Pretraining: `batch` is (B, seq_len+1); plain next-token shift, and the same
+    shifted targets are used for both the outer CE and the model's `targets=`.
+
+    SFT: `batch` is (B, 2, seq_len+1) — row 0 token ids, row 1 labels (-100 on
+    BOS+prompt, byte id on target+EOS). The model conditions on real bytes
+    (input_ids), the outer cross-entropy is supervised only on the target region
+    (targets_ce, -100 elsewhere), and the DENSE token row (targets_model) is
+    passed to model(targets=) so the router's boundary-matching aux loss stays
+    healthy over the whole sequence.
+    """
+    if sft:
+        tokens = batch[:, 0, :]
+        labels = batch[:, 1, :]
+        return tokens[:, :-1], labels[:, 1:], tokens[:, 1:]
+    shifted = batch[:, 1:]
+    return batch[:, :-1], shifted, shifted
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -316,23 +377,26 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
     if not ortho_reg_lambda:
         ortho_reg_lambda = 0.0
 
+    sft = cfg.get("sft", False)
+
     for batch_idx, batch in enumerate(val_dataloader):
         if batch_idx >= val_batches:
             break
 
         batch = batch.to(device)
-        input_ids = batch[:, :-1]
-        targets = batch[:, 1:]
+        input_ids, targets, targets_model = split_batch(batch, sft)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output = model(input_ids, mask=None, targets=targets)
+            output = model(input_ids, mask=None, targets=targets_model)
             logits = output.logits
 
-            # Sum (not mean) CE loss so we can compute BPB correctly
+            # Sum (not mean) CE loss so we can compute BPB correctly. ignore_index
+            # drops the -100 prompt positions in SFT (no-op in pretraining).
             ce_loss_sum = nn.functional.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
                 reduction="sum",
+                ignore_index=-100,
             )
             
             ortho_loss = 0.0
@@ -369,7 +433,9 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
         total_cert_loss += cert_loss
         total_bm_loss += bm_loss
         total_ortho_loss += ortho_loss
-        total_bytes += targets.numel()
+        # Count only supervised positions so val/loss and bpb are per-target-byte
+        # in SFT. In pretraining no position is -100, so this equals targets.numel().
+        total_bytes += int((targets != -100).sum().item())
         num_batches += 1
 
     if num_batches == 0:
@@ -563,22 +629,42 @@ def main():
     base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
     # ---- Data ----
-    dataloader, val_dataloader = create_dataloaders(
-        Path(cfg.data_dir),
-        cfg.get("dataset_config", "sample-10BT"),
-        cfg.get("dataset_mixture", None),
-        cfg.seq_len,
-        cfg.seed,
-        cfg.get("val_batches", 50),
-        cfg.batch_size,
-        cfg.num_workers
-    )
+    sft = cfg.get("sft", False)
+    if sft:
+        dataloader, val_dataloader = create_sft_dataloaders(
+            Path(cfg.data_dir),
+            cfg.sft_name,
+            cfg.seq_len,
+            cfg.seed,
+            cfg.get("val_batches", 50),
+            cfg.batch_size,
+            cfg.num_workers,
+        )
+    else:
+        dataloader, val_dataloader = create_dataloaders(
+            Path(cfg.data_dir),
+            cfg.get("dataset_config", "sample-10BT"),
+            cfg.get("dataset_mixture", None),
+            cfg.seq_len,
+            cfg.seed,
+            cfg.get("val_batches", 50),
+            cfg.batch_size,
+            cfg.num_workers
+        )
 
-    # ---- Resume ----
+    # ---- Resume / warm-start ----
+    # resume: continue this run (weights + optimizer + step). init_from: start a
+    # fresh run from another checkpoint's weights only (continual PT / SFT).
+    assert not (cfg.resume and cfg.get("init_from")), (
+        "Set either `resume: true` (continue this run) or `init_from` (warm-start "
+        "a new run from another checkpoint), not both."
+    )
     start_step = 0
     time_since_start = 0
     if cfg.resume:
         start_step, time_since_start = load_checkpoint(model, optimizer, cfg.checkpoint_dir, device)
+    elif cfg.get("init_from"):
+        load_weights_only(model, cfg.init_from, device)
 
     # ---- Wandb ----
     wandb_project = cfg.get("wandb_project", None)
@@ -662,12 +748,13 @@ def main():
                 batch = next(data_iter)
 
             batch = batch.to(device)
-            input_ids = batch[:, :-1]  # (B, seq_len)
-            targets = batch[:, 1:]     # (B, seq_len)
+            # SFT: targets is the -100-masked label row (loss on target only);
+            # targets_model is the dense token row for the router aux loss.
+            input_ids, targets, targets_model = split_batch(batch, sft)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 # mask=None triggers packed mode in the model
-                output = model(input_ids, mask=None, targets=targets)
+                output = model(input_ids, mask=None, targets=targets_model)
 
                 # AR cross-entropy loss
                 logits = output.logits  # (B, seq_len, vocab_size)
