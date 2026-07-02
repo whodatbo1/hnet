@@ -15,7 +15,7 @@ betas: [0.9, 0.95]
 max_grad_norm: 1.0
 
 # --- LR Schedule ---
-lr_schedule: cosine     # Linear warmup + cosine decay to min_lr (matches Megatron Llama baseline)
+lr_schedule: wsd     # Linear warmup + cosine decay to min_lr (matches Megatron Llama baseline)
 warmup_steps: 500       # Matches Megatron's LR_WARMUP_ITERS default
 min_lr: 4e-5            # Matches MIN_LR in the S_200M Llama configs
 

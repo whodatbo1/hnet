@@ -36,7 +36,7 @@ from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetCo
 from hnet.modules.block import Block
 from hnet.utils.data import create_dataloaders, create_sft_dataloaders
 from hnet.utils.train import load_balancing_loss, certainty_loss, group_params, orthogonality_regularization_soft, get_compression_ratio
-from hnet.utils.eval import bits_per_byte, compression_metrics
+from hnet.utils.eval import compression_metrics
 from hnet.modules.dc import RoutingModule
 
 # Learning rate schedule: Warmup-Stable-Decay (WSD)
@@ -277,6 +277,222 @@ def split_batch(batch, sft):
     return batch[:, :-1], shifted, shifted
 
 
+def unpack_batch(batch, device):
+    """Split a dataloader batch into (chunks, source_ids).
+
+    Mixture batches arrive as [chunks (B, L+1), source_ids (B,)] from
+    default_collate (MultilingualByteDataset yields (chunk, source_idx));
+    single-source and SFT batches are plain tensors -> source_ids is None.
+    """
+    if isinstance(batch, (list, tuple)):
+        return batch[0].to(device), batch[1].to(device)
+    return batch.to(device), None
+
+
+class PerSourceMetrics:
+    """Accumulate per-source (language) metric sums for dataset mixtures.
+
+    All state lives in fixed-size fp32 device tensors (sums and counts), so a
+    single all_reduce(SUM) at log/val time yields count-weighted global means.
+    Per-source lb/cert values are per-group statistics over that source's
+    positions; at inner stages they do not linearly recombine into the
+    aggregate scalars (rows contribute unequal patch counts) — that is the
+    intended semantics of a per-language split, not a decomposition.
+    """
+
+    def __init__(self, source_names, n_route_stages, device):
+        self.source_names = list(source_names)
+        self.n_src = len(self.source_names)
+        self.n_route = n_route_stages
+        self.device = device
+        # Cumulative supervised-token totals across the whole run (survives
+        # reset(); like the aggregate total_tokens, restarts at 0 on resume).
+        # fp64 so multi-billion-token counts accumulate without rounding.
+        self.total_tok_count = torch.zeros(self.n_src, device=device, dtype=torch.float64)
+        self._q_points = torch.tensor([0.5, 0.75, 0.9, 0.99], device=device)
+        self.reset()
+
+    def reset(self):
+        def z(*shape):
+            return torch.zeros(*shape, device=self.device)
+        self.loss_sum = z(self.n_src)        # per-token CE sum
+        self.tok_count = z(self.n_src)       # supervised target tokens
+        self.pos_count = z(self.n_route, self.n_src)  # routing positions
+        self.mask_sum = z(self.n_route, self.n_src)   # selected boundaries
+        self.prob_sum = z(self.n_route, self.n_src)   # boundary probs
+        self.cert_sum = z(self.n_route, self.n_src)   # binary entropies
+        self.lb_wsum = z(self.n_route, self.n_src)    # position-weighted lb values
+        self.bm_sum = z(self.n_route, self.n_src)
+        self.bm_count = z(self.n_route, self.n_src)
+        self.ent_sum = z(self.n_route, self.n_src)
+        self.ent_count = z(self.n_route, self.n_src)
+        # Boundary-statistic detail sums
+        self.prob_sq_sum = z(self.n_route, self.n_src)   # G_var
+        self.sel_prob_sum = z(self.n_route, self.n_src)  # G_pos / G_neg
+        self.gq_sum = z(self.n_route, self.n_src, 4)     # per-batch G quantiles
+        self.gq_batch_count = z(self.n_route, self.n_src)
+
+    def _state(self):
+        return [self.loss_sum, self.tok_count, self.pos_count, self.mask_sum,
+                self.prob_sum, self.cert_sum, self.lb_wsum, self.bm_sum,
+                self.bm_count, self.ent_sum, self.ent_count,
+                self.prob_sq_sum, self.sel_prob_sum, self.gq_sum, self.gq_batch_count]
+
+    def flat_state(self):
+        return torch.cat([t.reshape(-1) for t in self._state()])
+
+    def load_flat_state(self, flat):
+        offset = 0
+        for t in self._state():
+            t.copy_(flat[offset:offset + t.numel()].view_as(t))
+            offset += t.numel()
+
+    def all_reduce(self):
+        flat = self.flat_state()
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+        self.load_flat_state(flat)
+
+    def accumulate_totals(self):
+        """Fold this window's token counts into the cumulative per-source totals.
+
+        Call once per log window, after all_reduce() and before reset(), so the
+        totals are global across ranks (every rank ends up with the same value).
+        """
+        self.total_tok_count += self.tok_count.double()
+
+    def total_metrics(self, prefix="total_tokens/"):
+        return {
+            f"{prefix}{name}": int(self.total_tok_count[j].item())
+            for j, name in enumerate(self.source_names)
+        }
+
+    @torch.no_grad()
+    def update(self, logits, targets, bpred_output, source_ids, downsample_n):
+        """Bucket one micro-batch's metrics by source. Detached throughout."""
+        tok_loss = nn.functional.cross_entropy(
+            logits.detach().reshape(-1, logits.size(-1)),
+            targets.reshape(-1),
+            reduction="none",
+            ignore_index=-100,
+        ).view(targets.shape)
+        self.loss_sum.index_add_(0, source_ids, tok_loss.sum(dim=1).float())
+        self.tok_count.index_add_(0, source_ids, (targets != -100).sum(dim=1).float())
+
+        if not bpred_output:
+            return
+        # Map each packed routing position back to its row's source: bpred_output
+        # is ordered outermost-first, and each stage's boundary_mask selects, in
+        # order, the positions forwarded to the next stage.
+        row_ids = torch.arange(
+            source_ids.shape[0], device=source_ids.device
+        ).repeat_interleave(targets.shape[1])
+        for s, router_out in enumerate(bpred_output):
+            lang = source_ids[row_ids]
+            bmask = router_out.boundary_mask.reshape(-1)
+            p = router_out.boundary_prob[..., -1].float().reshape(-1)
+
+            cnt = torch.zeros(self.n_src, device=self.device).index_add_(0, lang, torch.ones_like(p))
+            mask_sum = torch.zeros(self.n_src, device=self.device).index_add_(0, lang, bmask.float())
+            prob_sum = torch.zeros(self.n_src, device=self.device).index_add_(0, lang, p)
+            self.pos_count[s] += cnt
+            self.mask_sum[s] += mask_sum
+            self.prob_sum[s] += prob_sum
+
+            # Same eps and formula as certainty_loss
+            pc = p.clamp(1e-7, 1 - 1e-7)
+            self.cert_sum[s].index_add_(0, lang, -(pc * pc.log() + (1 - pc) * (1 - pc).log()))
+
+            # Same combiner as load_balancing_loss, applied to this source's
+            # means for this micro-batch, weighted by its position count (uses
+            # the correct per-step N under compression_schedule and skips
+            # sources absent from the micro-batch).
+            safe_cnt = cnt.clamp(min=1)
+            true_ratio = mask_sum / safe_cnt
+            average_prob = prob_sum / safe_cnt
+            lb = (
+                (1 - true_ratio) * (1 - average_prob)
+                + true_ratio * average_prob * (downsample_n - 1)
+            ) * downsample_n / (downsample_n - 1)
+            self.lb_wsum[s] += lb * cnt
+
+            if router_out.bm_loss_per_pos is not None:
+                self.bm_sum[s].index_add_(0, lang, router_out.bm_loss_per_pos.reshape(-1))
+                self.bm_count[s].index_add_(0, lang, router_out.bm_valid_mask.reshape(-1).float())
+            if router_out.entropy_per_pos is not None:
+                self.ent_sum[s].index_add_(0, lang, router_out.entropy_per_pos.reshape(-1))
+                self.ent_count[s] += cnt
+
+            # Boundary-statistic details: exact position sums for G_var and
+            # G_pos/G_neg; quantiles can't be accumulated exactly, so store
+            # per-micro-batch quantiles and average them at log time (same
+            # semantics as the aggregate accum_comp_metrics).
+            self.prob_sq_sum[s].index_add_(0, lang, p * p)
+            self.sel_prob_sum[s].index_add_(0, lang, p * bmask.float())
+            for j in lang.unique().tolist():
+                self.gq_sum[s, j] += torch.quantile(p[lang == j], self._q_points)
+                self.gq_batch_count[s, j] += 1
+
+            row_ids = row_ids[bmask]
+
+    def metrics(self, prefix="", comp_prefix=None):
+        """Per-source metric dict from the accumulated sums.
+
+        prefix is used for loss-like keys ("" for train, "val/" for val);
+        comp_prefix for the per-stage compression keys ("train/" or "val/",
+        defaults to prefix). Sources with zero counts are omitted.
+        """
+        if comp_prefix is None:
+            comp_prefix = prefix
+        out = {}
+        for j, name in enumerate(self.source_names):
+            if self.tok_count[j] > 0:
+                out[f"{prefix}loss/{name}"] = (self.loss_sum[j] / self.tok_count[j]).item()
+            stage_has = self.pos_count[:, j] > 0
+            if stage_has.any():
+                cnt = self.pos_count[stage_has, j]
+                # Mean over stages, mirroring the aggregate losses' average
+                # over bpred_output
+                out[f"{prefix}lb_loss/{name}"] = (self.lb_wsum[stage_has, j] / cnt).mean().item()
+                out[f"{prefix}cert_loss/{name}"] = (self.cert_sum[stage_has, j] / cnt).mean().item()
+            bm_has = self.bm_count[:, j] > 0
+            if bm_has.any():
+                out[f"{prefix}bm_loss/{name}"] = (
+                    self.bm_sum[bm_has, j] / self.bm_count[bm_has, j]
+                ).mean().item()
+            for s in range(self.n_route):
+                if self.pos_count[s, j] > 0:
+                    n = self.pos_count[s, j]
+                    sel = self.mask_sum[s, j]
+                    ps = self.prob_sum[s, j]
+                    out[f"{comp_prefix}stage_{s}/F_selected/{name}"] = (sel / n).item()
+                    out[f"{comp_prefix}stage_{s}/G_avg_boundary_prob/{name}"] = (ps / n).item()
+                    # Unbiased variance over the window's positions from sums
+                    # (boundary_mask is 0/1, so its sum of squares == sel)
+                    denom = (n - 1).clamp(min=1)
+                    out[f"{comp_prefix}stage_{s}/G_var/{name}"] = (
+                        (self.prob_sq_sum[s, j] - ps * ps / n) / denom
+                    ).item()
+                    out[f"{comp_prefix}stage_{s}/F_var/{name}"] = ((sel - sel * sel / n) / denom).item()
+                    if sel > 0:
+                        out[f"{comp_prefix}stage_{s}/G_boundary_prob_pos/{name}"] = (
+                            self.sel_prob_sum[s, j] / sel
+                        ).item()
+                    if n > sel:
+                        out[f"{comp_prefix}stage_{s}/G_boundary_prob_neg/{name}"] = (
+                            (ps - self.sel_prob_sum[s, j]) / (n - sel)
+                        ).item()
+                if self.gq_batch_count[s, j] > 0:
+                    for qi, qname in enumerate(("G_p50", "G_p75", "G_p90", "G_p99")):
+                        out[f"{comp_prefix}stage_{s}/{qname}/{name}"] = (
+                            self.gq_sum[s, j, qi] / self.gq_batch_count[s, j]
+                        ).item()
+                if self.ent_count[s, j] > 0:
+                    out[f"{prefix}entropy/stage_{s}/batch_mean/{name}"] = (
+                        self.ent_sum[s, j] / self.ent_count[s, j]
+                    ).item()
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -348,11 +564,18 @@ def load_config(argv=None):
 def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
     """Run validation and return metrics dict.
 
-    Computes:
+    val_dataloader is either a single DataLoader (single-source / SFT runs) or
+    a list of (source_name, DataLoader) pairs (mixture runs; see
+    create_dataloaders). In the list case each loader is single-source and is
+    evaluated for cfg.val_batches batches — i.e. val_batches is PER SOURCE —
+    producing val/.../<name> metrics, while the unsuffixed val/* metrics pool
+    the batches of all sources.
+
+    Computes (pooled, and per source with a /<name> suffix for mixtures):
     - val/loss: average cross-entropy loss
     - val/bpb: bits-per-byte
-    - val/lb_loss: average load-balancing loss
-    - val/stage_*/F_selected, val/stage_*/G_avg_boundary_prob: compression metrics
+    - val/lb_loss, val/cert_loss, val/bm_loss: average aux losses
+    - val/stage_*/...: compression / boundary statistics
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     distributed = dist.is_initialized()
@@ -360,14 +583,8 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
     was_training = model.training
     model.eval()
 
-    total_ce_loss = torch.tensor(0.0, device=device)
-    total_lb_loss = torch.tensor(0.0, device=device)
-    total_cert_loss = torch.tensor(0.0, device=device)
-    total_bm_loss = torch.tensor(0.0, device=device)
-    total_ortho_loss = torch.tensor(0.0, device=device)
-    total_bytes = 0
-    num_batches = 0
-    all_compression_metrics = {}
+    loaders = val_dataloader if isinstance(val_dataloader, list) else [(None, val_dataloader)]
+    n_loaders = len(loaders)
 
     val_batches = cfg.get("val_batches", 50)
     if downsample_n is None:
@@ -379,111 +596,128 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
 
     sft = cfg.get("sft", False)
 
-    for batch_idx, batch in enumerate(val_dataloader):
-        if batch_idx >= val_batches:
-            break
+    # Per-loader sums; columns: [ce, lb, cert, ortho, bm, bytes, batches]
+    stats = torch.zeros(n_loaders, 7, device=device)
+    # Per-loader {metric_key: [per-batch values]}; rank-local (as before)
+    comp_lists = [{} for _ in loaders]
 
-        batch = batch.to(device)
-        input_ids, targets, targets_model = split_batch(batch, sft)
+    for li, (_, loader) in enumerate(loaders):
+        for batch_idx, batch in enumerate(loader):
+            if batch_idx >= val_batches:
+                break
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output = model(input_ids, mask=None, targets=targets_model)
-            logits = output.logits
+            batch, _ = unpack_batch(batch, device)
+            input_ids, targets, targets_model = split_batch(batch, sft)
 
-            # Sum (not mean) CE loss so we can compute BPB correctly. ignore_index
-            # drops the -100 prompt positions in SFT (no-op in pretraining).
-            ce_loss_sum = nn.functional.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
-                reduction="sum",
-                ignore_index=-100,
-            )
-            
-            ortho_loss = 0.0
-            if ortho_reg_lambda > 0:
-                for module in model.modules():
-                    if isinstance(module, RoutingModule):
-                        ortho_loss += orthogonality_regularization_soft(module.q_proj_layer.weight)
-                        ortho_loss += orthogonality_regularization_soft(module.k_proj_layer.weight)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                output = model(input_ids, mask=None, targets=targets_model)
+                logits = output.logits
 
-            lb_loss = torch.tensor(0.0, device=device)
-            cert_loss = torch.tensor(0.0, device=device)
-            bm_loss = torch.tensor(0.0, device=device)
+                # Sum (not mean) CE loss so we can compute BPB correctly. ignore_index
+                # drops the -100 prompt positions in SFT (no-op in pretraining).
+                ce_loss_sum = nn.functional.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    reduction="sum",
+                    ignore_index=-100,
+                )
 
-            if output.bpred_output:
-                for router_out in output.bpred_output:
-                    lb_loss = lb_loss + load_balancing_loss(
-                        router_out, N=downsample_n
-                    )
-                    cert_loss = cert_loss + certainty_loss(router_out)
-                    if router_out.bm_loss is not None:
-                        bm_loss += router_out.bm_loss
+                ortho_loss = 0.0
+                if ortho_reg_lambda > 0:
+                    for module in model.modules():
+                        if isinstance(module, RoutingModule):
+                            ortho_loss += orthogonality_regularization_soft(module.q_proj_layer.weight)
+                            ortho_loss += orthogonality_regularization_soft(module.k_proj_layer.weight)
 
-                lb_loss = lb_loss / len(output.bpred_output)
-                cert_loss = cert_loss / len(output.bpred_output)
-                bm_loss = bm_loss / len(output.bpred_output)
+                lb_loss = torch.tensor(0.0, device=device)
+                cert_loss = torch.tensor(0.0, device=device)
+                bm_loss = torch.tensor(0.0, device=device)
 
-                # Accumulate compression metrics
-                batch_comp = compression_metrics(output.bpred_output)
-                for k, v in batch_comp.items():
-                    all_compression_metrics.setdefault(k, []).append(v)
+                if output.bpred_output:
+                    for router_out in output.bpred_output:
+                        lb_loss = lb_loss + load_balancing_loss(
+                            router_out, N=downsample_n
+                        )
+                        cert_loss = cert_loss + certainty_loss(router_out)
+                        if router_out.bm_loss is not None:
+                            bm_loss += router_out.bm_loss
 
-        total_ce_loss += ce_loss_sum
-        total_lb_loss += lb_loss
-        total_cert_loss += cert_loss
-        total_bm_loss += bm_loss
-        total_ortho_loss += ortho_loss
-        # Count only supervised positions so val/loss and bpb are per-target-byte
-        # in SFT. In pretraining no position is -100, so this equals targets.numel().
-        total_bytes += int((targets != -100).sum().item())
-        num_batches += 1
+                    lb_loss = lb_loss / len(output.bpred_output)
+                    cert_loss = cert_loss / len(output.bpred_output)
+                    bm_loss = bm_loss / len(output.bpred_output)
 
-    if num_batches == 0:
+                    # Accumulate compression / boundary metrics
+                    batch_comp = compression_metrics(output.bpred_output)
+                    for k, v in batch_comp.items():
+                        comp_lists[li].setdefault(k, []).append(v)
+
+            stats[li, 0] += ce_loss_sum
+            stats[li, 1] += lb_loss
+            stats[li, 2] += cert_loss
+            stats[li, 3] += ortho_loss
+            stats[li, 4] += bm_loss
+            # Count only supervised positions so val/loss and bpb are per-target-byte
+            # in SFT. In pretraining no position is -100, so this equals targets.numel().
+            stats[li, 5] += (targets != -100).sum()
+            stats[li, 6] += 1
+
+    if stats[:, 6].sum().item() == 0:
         model.train(was_training)
         return {}
 
-    # Aggregate across ranks
+    # Aggregate across ranks (single collective over all loaders' sums)
     if distributed:
-        stats = torch.tensor([total_ce_loss, total_lb_loss, total_cert_loss, total_ortho_loss, total_bm_loss, float(total_bytes), float(num_batches)], device=device)
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_ce_loss = stats[0]
-        total_lb_loss_sum = stats[1]
-        total_cert_loss = stats[2]
-        total_ortho_loss = stats[3]
-        total_bm_loss = stats[4]
-        total_bytes = int(stats[5].item())
-        num_batches = int(stats[6].item())
-    else:
-        total_lb_loss_sum = total_lb_loss
 
-    bpb = bits_per_byte(total_ce_loss, total_bytes)
-    avg_loss = (total_ce_loss / total_bytes).item()
-    avg_lb = (total_lb_loss_sum / num_batches).item()
-    avg_cert = (total_cert_loss / num_batches).item()
-    avg_ortho = (total_ortho_loss / num_batches).item()
-    avg_bm_loss = (total_bm_loss / num_batches).item()
+    def derive(row, suffix=""):
+        """Loss metrics from one summed stats row (pooled or per-source)."""
+        ce, lb, cert, _, bm, nbytes, nbatches = row.tolist()
+        if nbatches == 0 or nbytes == 0:
+            return {}
+        sfx = f"/{suffix}" if suffix else ""
+        return {
+            f"val/loss{sfx}": ce / nbytes,
+            f"val/bpb{sfx}": ce / (nbytes * math.log(2)),
+            f"val/lb_loss{sfx}": lb / nbatches,
+            f"val/cert_loss{sfx}": cert / nbatches,
+            f"val/bm_loss{sfx}": bm / nbatches,
+        }
 
-    metrics = {
-        "val/loss": avg_loss,
-        "val/bpb": bpb,
-        "val/lb_loss": avg_lb,
-        "val/cert_loss": avg_cert,
-        "val/ortho_loss": avg_ortho,
-        "val/bm_loss": avg_bm_loss,
-        "step": step,
-    }
+    pooled_row = stats.sum(dim=0)
+    metrics = {"step": step}
+    metrics.update(derive(pooled_row))
+    metrics["val/ortho_loss"] = (pooled_row[3] / pooled_row[6]).item()
 
-    # Average compression metrics
-    for k, vals in all_compression_metrics.items():
+    # Compression / boundary metrics: pooled over all batches, plus per source
+    pooled_comp = {}
+    for li, (name, _) in enumerate(loaders):
+        for k, vals in comp_lists[li].items():
+            pooled_comp.setdefault(k, []).extend(vals)
+            if name is not None and vals:
+                metrics[f"val/{k}/{name}"] = sum(vals) / len(vals)
+    for k, vals in pooled_comp.items():
         metrics[f"val/{k}"] = sum(vals) / len(vals)
+
+    # Per-source loss metrics
+    for li, (name, _) in enumerate(loaders):
+        if name is not None:
+            metrics.update(derive(stats[li], suffix=name))
 
     # Entropy routing stats (running EMA + learned params)
     metrics.update(collect_entropy_metrics(model, prefix="val/"))
 
     print_rank0(
-        f"[val] step={step:>6d} | bpb={bpb:.4f} | loss={avg_loss:.4f} | lb_loss={avg_lb:.4f} | cert_loss={avg_cert:.4f} | ortho_loss={avg_ortho:.4f} | bm_loss={avg_bm_loss:.4f}",
+        f"[val] step={step:>6d} | bpb={metrics['val/bpb']:.4f} | loss={metrics['val/loss']:.4f} | "
+        f"lb_loss={metrics['val/lb_loss']:.4f} | cert_loss={metrics['val/cert_loss']:.4f} | "
+        f"ortho_loss={metrics['val/ortho_loss']:.4f} | bm_loss={metrics['val/bm_loss']:.4f}",
         rank,
     )
+    for li, (name, _) in enumerate(loaders):
+        if name is not None and f"val/loss/{name}" in metrics:
+            print_rank0(
+                f"[val]   {name}: loss={metrics[f'val/loss/{name}']:.4f} | bpb={metrics[f'val/bpb/{name}']:.4f}",
+                rank,
+            )
 
     model.train(was_training)
     return metrics
@@ -652,6 +886,14 @@ def main():
             cfg.num_workers
         )
 
+    # Per-language metrics only apply to real multi-source mixtures; for a
+    # single-entry mixture _build_dataset returns a bare MemmapByteDataset
+    # (plain-tensor batches, no source ids), so the >1 guard must match.
+    mixture = cfg.get("dataset_mixture", None)
+    source_names = None
+    if not sft and mixture is not None and len(mixture) > 1:
+        source_names = [s["name"] for s in mixture]
+
     # ---- Resume / warm-start ----
     # resume: continue this run (weights + optimizer + step). init_from: start a
     # fresh run from another checkpoint's weights only (continual PT / SFT).
@@ -705,6 +947,11 @@ def main():
     accum_tokens = 0
     total_tokens = 0
     epoch = 0
+    # num_stages includes the innermost stage, which has no router
+    lang_metrics_acc = (
+        PerSourceMetrics(source_names, num_stages - 1, device)
+        if source_names is not None else None
+    )
 
     # Timing
     train_start = time.time()
@@ -747,7 +994,7 @@ def main():
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
 
-            batch = batch.to(device)
+            batch, source_ids = unpack_batch(batch, device)
             # SFT: targets is the -100-masked label row (loss on target only);
             # targets_model is the dense token row for the router aux loss.
             input_ids, targets, targets_model = split_batch(batch, sft)
@@ -808,6 +1055,10 @@ def main():
             accum_tokens += targets.numel()
             for k, v in compression_metrics(output.bpred_output).items():
                 accum_comp_metrics[k] += v
+            if lang_metrics_acc is not None and source_ids is not None:
+                lang_metrics_acc.update(
+                    logits, targets, output.bpred_output, source_ids, current_downsample_n
+                )
 
         # clamp(min=1) prevents 0/0 NaN for stages without entropy routing;
         # those stages have zero counts so their weights are 0/1=0, which is harmless
@@ -880,6 +1131,17 @@ def main():
             n_accum = cfg.grad_accum_steps * cfg.log_every
             avg_comp_metrics = {f"train/{k}": v / n_accum for k, v in accum_comp_metrics.items()}
 
+            # Per-language metrics: reduce sums on ALL ranks (collective), then
+            # compute count-weighted means for this log window
+            lang_metrics = {}
+            if lang_metrics_acc is not None:
+                if distributed:
+                    lang_metrics_acc.all_reduce()
+                lang_metrics_acc.accumulate_totals()
+                lang_metrics = lang_metrics_acc.metrics(prefix="", comp_prefix="train/")
+                lang_metrics.update(lang_metrics_acc.total_metrics())
+                lang_metrics_acc.reset()
+
             if wandb_project and rank == 0:
                 import wandb
                 wandb.log({
@@ -899,6 +1161,7 @@ def main():
                     **grad_norm_metrics,
                     **avg_comp_metrics,
                     **collect_entropy_metrics(model),
+                    **lang_metrics,
                 }, step=step)
 
             accum_loss = 0.0
@@ -911,7 +1174,8 @@ def main():
             elapsed_time_since_last_log = 0
 
         if cfg.get("validate_every", 0) > 0 and step % cfg.validate_every == 0:
-            val_metrics = validate(model, val_dataloader, cfg, step, device, downsample_n=current_downsample_n)
+            val_metrics = validate(model, val_dataloader, cfg, step, device,
+                                   downsample_n=current_downsample_n)
             if val_metrics and wandb_project and rank == 0:
                 import wandb
                 wandb.log(val_metrics)

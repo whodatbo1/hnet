@@ -92,10 +92,13 @@ class MultilingualByteDataset(IterableDataset):
     """Multiplex several MemmapByteDatasets at configured weights.
 
     On every yield, picks one source by weighted-random choice and pulls its
-    next chunk. When a source's per-worker iterator is exhausted, it is
-    re-iterated (so smaller languages cycle more often — that is the whole
-    point of the weight knob). DDP/worker sharding is delegated to each
-    sub-dataset, which already shards by global_worker_id.
+    next chunk. Yields ``(chunk, source_idx)`` so consumers can attribute each
+    row to its source (e.g. per-language loss metrics in train.py); the default
+    collate turns this into ``[chunks (B, L+1), source_ids (B,)]``. When a
+    source's per-worker iterator is exhausted, it is re-iterated (so smaller
+    languages cycle more often — that is the whole point of the weight knob).
+    DDP/worker sharding is delegated to each sub-dataset, which already shards
+    by global_worker_id.
 
     Args:
         sub_datasets: List of MemmapByteDataset instances, one per source.
@@ -146,7 +149,7 @@ class MultilingualByteDataset(IterableDataset):
                     # Source has zero chunks for this worker — drop it from the mixture
                     weights[i] = 0
                     continue
-            yield chunk
+            yield chunk, i
             samples_yielded += 1
 
 
@@ -261,9 +264,14 @@ def create_dataloaders(data_dir, dataset_config, dataset_mixture,
     Mixture mode: dataset_mixture is a list of dicts, e.g.
         [{name: hplt-eng_Latn, weight: 0.75}, {name: hplt-nld_Latn, weight: 0.25}]
     Each `name` is resolved with the same rules above. Weights are normalized
-    to 1. Train and val both use the same mixture so the reported val_loss is
-    directly comparable to train loss. Per-yield weighted sampling means batch
-    composition matches the weights in expectation.
+    to 1. Per-yield weighted sampling means train batch composition matches
+    the weights in expectation.
+
+    Validation: single-source mode returns one DataLoader. Mixture mode returns
+    a list of (source_name, DataLoader) pairs — one single-source loader per
+    mixture entry, so `val_batches` is PER SOURCE and each source is evaluated
+    on exactly the same val chunks a single-source run with the same settings
+    (seed, seq_len, world_size, num_workers, batch_size) would use.
 
     Run scripts/prepare_data.py once per source to generate the .bin files.
     """
@@ -288,11 +296,6 @@ def create_dataloaders(data_dir, dataset_config, dataset_mixture,
         subset_dirs, weights, "train.bin",
         seq_len=seq_len, seed=seed, shuffle=True, max_samples=None,
     )
-    val_dataset = _build_dataset(
-        subset_dirs, weights, "val.bin",
-        seq_len=seq_len, seed=seed, shuffle=False,
-        max_samples=val_batches * batch_size,
-    )
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -301,13 +304,28 @@ def create_dataloaders(data_dir, dataset_config, dataset_mixture,
         pin_memory=True,
         drop_last=True,
     )
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
+
+    def _val_loader(dirs):
+        dataset = _build_dataset(
+            dirs, [1.0] * len(dirs), "val.bin",
+            seq_len=seq_len, seed=seed, shuffle=False,
+            max_samples=val_batches * batch_size,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+
+    if len(subset_dirs) > 1:
+        # One single-source val loader per mixture entry (val_batches each)
+        val_dataloader = [
+            (name, _val_loader([d])) for name, d in zip(subset_names, subset_dirs)
+        ]
+    else:
+        val_dataloader = _val_loader(subset_dirs)
 
     return train_dataloader, val_dataloader
 

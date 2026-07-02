@@ -18,6 +18,24 @@ from hnet.modules.utils import get_seq_idx
 from hnet.models.config_hnet import RoutingConfig
 
 
+@torch.no_grad()
+def _per_position_bm_loss(bm_logits: torch.Tensor, targets: torch.Tensor):
+    """Detached per-position CE of the byte-modelling head (for per-source metrics).
+
+    The scalar bm_loss used in the training objective is computed separately with
+    the exact same fused mean-reduction call as before; this copy exists only so
+    the loss can be re-bucketed by data source in train.py.
+    """
+    targets_flat = targets.reshape(-1)
+    per_pos = F.cross_entropy(
+        bm_logits.detach().reshape(-1, bm_logits.size(-1)),
+        targets_flat,
+        reduction="none",
+        ignore_index=-100,
+    ).float()
+    return per_pos, targets_flat != -100
+
+
 def _is_space_like_byte(tokens: torch.Tensor) -> torch.Tensor:
     """SpaceByte heuristic (arxiv 2404.14408): True at every "space-like" byte —
     non-alphanumeric printable ASCII or UTF-8 multibyte start byte. ASCII
@@ -41,6 +59,11 @@ class RoutingModuleOutput:
     bm_loss: Optional[torch.Tensor] = None
     entropy_mean: Optional[torch.Tensor] = None
     entropy_std: Optional[torch.Tensor] = None
+    # Detached per-position diagnostics (flattened over all positions), used by
+    # train.py to bucket metrics per data source. Not part of the loss graph.
+    bm_loss_per_pos: Optional[torch.Tensor] = None  # fp32 (P,), 0 at ignored positions
+    bm_valid_mask: Optional[torch.Tensor] = None    # bool (P,), targets != -100
+    entropy_per_pos: Optional[torch.Tensor] = None  # fp32 (P,)
 
 
 @dataclass
@@ -179,6 +202,9 @@ class RoutingModule(nn.Module):
         boundary_prob = None
         batch_entropy_mean = None
         batch_entropy_std = None
+        bm_loss_per_pos = None
+        bm_valid_mask = None
+        entropy_per_pos = None
 
         if self.identity_routing:
             cos_sim = torch.einsum(
@@ -233,6 +259,7 @@ class RoutingModule(nn.Module):
             with torch.no_grad():
                 batch_entropy_mean = entropies.mean()
                 batch_entropy_std = entropies.var().sqrt()
+                entropy_per_pos = entropies.detach().float().reshape(-1)
                 prev_entropy_mean = self.entropy_mean.detach()
                 prev_entropy_std = self.entropy_std.detach()
 
@@ -247,6 +274,7 @@ class RoutingModule(nn.Module):
                     targets.reshape(-1),
                     ignore_index=-100,
                 )
+                bm_loss_per_pos, bm_valid_mask = _per_position_bm_loss(bm_logits, targets)
         elif self.space_like_routing:
             assert input_ids is not None, (
                 "space_like_routing requires input_ids — thread it from HNet.forward"
@@ -268,6 +296,7 @@ class RoutingModule(nn.Module):
                     targets.reshape(-1),
                     ignore_index=-100,
                 )
+                bm_loss_per_pos, bm_valid_mask = _per_position_bm_loss(bm_logits, targets)
             cos_sim = torch.einsum(
                 "b l d, b l d -> b l",
                 F.normalize(self.q_proj_layer(hidden_states[:, :-1]), dim=-1),
@@ -333,6 +362,9 @@ class RoutingModule(nn.Module):
             stage_idx=self.stage_idx,
             entropy_mean=batch_entropy_mean,
             entropy_std=batch_entropy_std,
+            bm_loss_per_pos=bm_loss_per_pos,
+            bm_valid_mask=bm_valid_mask,
+            entropy_per_pos=entropy_per_pos,
         )
 
     def step(self, hidden_states, inference_params, input_ids=None):

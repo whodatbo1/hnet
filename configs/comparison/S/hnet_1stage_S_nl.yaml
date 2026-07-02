@@ -29,12 +29,8 @@ bm_loss_weight: 0.0          # Byte-modelling loss of encoder used for entropy r
 data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with download_data.py)
 dataset_mixture: [
   {
-    name: hplt-eng_Latn,
-    weight: 0.5
-  },
-  {
-    name: hplt-cmn_Hans,
-    weight: 0.5
+    name: hplt-nl_Latn,
+    weight: 1.0
   }
 ]
 seq_len: 8192
@@ -55,14 +51,14 @@ val_fraction: 0.005       # Fraction of streaming documents reserved for validat
 val_batches: 1600         # Micro-batches per run; 1600 x 16 = 25,600 seqs (matches Megatron EVAL_ITERS=100 x GBS=256)
 
 # --- Checkpointing ---
-checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_en_cmn
+checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/S/hnet_1stage_S_nl
 save_every: 500
 resume: true
 
 # --- Logging ---
 log_every: 20
 wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
-wandb_run_name: "train_hnet_1stage_S_en_cmn"
+wandb_run_name: "train_hnet_1stage_S_nl"
 
 # --- Memory ---
 activation_checkpointing: false

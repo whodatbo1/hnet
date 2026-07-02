@@ -24,7 +24,7 @@ betas: [0.9, 0.95]
 max_grad_norm: 1.0
 
 # --- LR Schedule ---
-lr_schedule: cosine
+lr_schedule: wsd
 warmup_steps: 100
 min_lr: 1e-5
 
