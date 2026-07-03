@@ -36,20 +36,32 @@ class MemmapByteDataset(IterableDataset):
     Each yielded item is a LongTensor of length seq_len + 1. The training loop
     splits it into input_ids = item[:-1] and targets = item[1:].
 
+    Shuffling is block-local for I/O locality: chunk-level shuffling over a
+    file much larger than RAM degenerates into random ~8KB reads, which on a
+    network filesystem (GPFS) suffer massive read amplification and starve the
+    GPU. Instead, each worker owns whole contiguous ~read_block_bytes blocks,
+    shuffles the block order, reads one block at a time with a single large
+    sequential read, and yields its chunks in shuffled order. shuffle=False
+    (validation) keeps the original strided sequential layout, so val sets are
+    unchanged.
+
     Args:
         bin_path: Path to the flat uint8 binary file (train.bin or val.bin).
         seq_len: Number of input tokens per sample (output length = seq_len + 1).
         seed: Base random seed. Each worker gets seed + global_worker_id.
         shuffle: Shuffle chunk order each epoch (True for train, False for val).
         max_samples: Stop after this many chunks (used to cap validation).
+        read_block_bytes: Approximate contiguous read size for shuffled mode.
     """
 
-    def __init__(self, bin_path, seq_len, seed=42, shuffle=True, max_samples=None):
+    def __init__(self, bin_path, seq_len, seed=42, shuffle=True, max_samples=None,
+                 read_block_bytes=16 * 1024 * 1024):
         self.bin_path = str(bin_path)
         self.seq_len = seq_len
         self.seed = seed
         self.shuffle = shuffle
         self.max_samples = max_samples
+        self.chunks_per_block = max(1, read_block_bytes // (seq_len + 1))
 
         num_bytes = Path(bin_path).stat().st_size
         # Each chunk is seq_len + 1 bytes (input + 1 target)
@@ -67,25 +79,46 @@ class MemmapByteDataset(IterableDataset):
         total_workers = world_size * num_workers
         global_worker_id = rank * num_workers + worker_id
 
-        # Each worker owns a strided slice of chunks
-        worker_chunks = np.arange(global_worker_id, self.num_chunks, total_workers)
-
         rng = np.random.default_rng(self.seed + global_worker_id)
-        if self.shuffle:
-            rng.shuffle(worker_chunks)
 
         # Open memmap once per worker iteration; the OS keeps it in page cache
         data = np.memmap(self.bin_path, dtype=np.uint8, mode="r")
 
         samples_yielded = 0
         chunk_len = self.seq_len + 1
-        for chunk_id in worker_chunks:
-            start = int(chunk_id) * chunk_len
-            chunk = torch.from_numpy(data[start : start + chunk_len].astype(np.int64))
-            yield chunk
-            samples_yielded += 1
-            if self.max_samples is not None and samples_yielded >= self.max_samples:
-                return
+
+        if not self.shuffle:
+            # Sequential mode (validation): each worker owns a strided slice of
+            # chunks, read in order. Unchanged layout so val sets stay fixed.
+            worker_chunks = np.arange(global_worker_id, self.num_chunks, total_workers)
+            for chunk_id in worker_chunks:
+                start = int(chunk_id) * chunk_len
+                chunk = torch.from_numpy(data[start : start + chunk_len].astype(np.int64))
+                yield chunk
+                samples_yielded += 1
+                if self.max_samples is not None and samples_yielded >= self.max_samples:
+                    return
+            return
+
+        # Shuffled mode (train): shard whole contiguous blocks across workers,
+        # shuffle block order, then shuffle chunks within each block.
+        num_blocks = (self.num_chunks + self.chunks_per_block - 1) // self.chunks_per_block
+        worker_blocks = np.arange(global_worker_id, num_blocks, total_workers)
+        rng.shuffle(worker_blocks)
+
+        for block_id in worker_blocks:
+            first_chunk = int(block_id) * self.chunks_per_block
+            n_chunks = min(self.chunks_per_block, self.num_chunks - first_chunk)
+            start = first_chunk * chunk_len
+            # One large sequential read per block (copies out of the memmap)
+            block = np.ascontiguousarray(
+                data[start : start + n_chunks * chunk_len]
+            ).reshape(n_chunks, chunk_len)
+            for i in rng.permutation(n_chunks):
+                yield torch.from_numpy(block[i].astype(np.int64))
+                samples_yielded += 1
+                if self.max_samples is not None and samples_yielded >= self.max_samples:
+                    return
 
 
 class MultilingualByteDataset(IterableDataset):
