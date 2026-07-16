@@ -1,0 +1,96 @@
+{
+  "dataset": "FLORES-200",
+  "splits": [
+    "dev",
+    "devtest"
+  ],
+  "n_sentences": 2009,
+  "baseline": "eng_Latn",
+  "tokenizers": {
+    "gpt2": "openai-community/gpt2",
+    "llama3": "meta-llama/Meta-Llama-3-8B"
+  },
+  "languages": {
+    "eng_Latn": {
+      "n_sentences": 2009,
+      "bytes": 257386,
+      "gpt2_tokens": 52785,
+      "llama3_tokens": 52963,
+      "byte_parity": 1.0,
+      "gpt2_parity": 1.0,
+      "llama3_parity": 1.0
+    },
+    "bul_Cyrl": {
+      "n_sentences": 2009,
+      "bytes": 487880,
+      "gpt2_tokens": 289396,
+      "llama3_tokens": 107946,
+      "byte_parity": 1.8955187927859325,
+      "gpt2_parity": 5.482542388936251,
+      "llama3_parity": 2.038139833468648
+    },
+    "nld_Latn": {
+      "n_sentences": 2009,
+      "bytes": 287058,
+      "gpt2_tokens": 103766,
+      "llama3_tokens": 84308,
+      "byte_parity": 1.1152821054758224,
+      "gpt2_parity": 1.9658236241356446,
+      "llama3_parity": 1.591828257462757
+    },
+    "deu_Latn": {
+      "n_sentences": 2009,
+      "bytes": 305294,
+      "gpt2_tokens": 112984,
+      "llama3_tokens": 83476,
+      "byte_parity": 1.1861328899007717,
+      "gpt2_parity": 2.14045656910107,
+      "llama3_parity": 1.5761191775390366
+    },
+    "fra_Latn": {
+      "n_sentences": 2009,
+      "bytes": 318603,
+      "gpt2_tokens": 105142,
+      "llama3_tokens": 84200,
+      "byte_parity": 1.2378412190251218,
+      "gpt2_parity": 1.9918916358814056,
+      "llama3_parity": 1.5897890980495817
+    },
+    "fin_Latn": {
+      "n_sentences": 2009,
+      "bytes": 285011,
+      "gpt2_tokens": 120105,
+      "llama3_tokens": 105152,
+      "byte_parity": 1.107329069957185,
+      "gpt2_parity": 2.2753623188405796,
+      "llama3_parity": 1.9853860242055774
+    },
+    "kor_Hang": {
+      "n_sentences": 2009,
+      "bytes": 308717,
+      "gpt2_tokens": 265882,
+      "llama3_tokens": 78907,
+      "byte_parity": 1.1994319815374574,
+      "gpt2_parity": 5.037074926588993,
+      "llama3_parity": 1.4898514056983176
+    },
+    "cmn_Hans": {
+      "n_sentences": 2009,
+      "bytes": 238065,
+      "gpt2_tokens": 167489,
+      "llama3_tokens": 68361,
+      "byte_parity": 0.9249337570808047,
+      "gpt2_parity": 3.173041583783272,
+      "llama3_parity": 1.2907312652228915
+    },
+    "arb_Arab": {
+      "n_sentences": 2009,
+      "bytes": 411871,
+      "gpt2_tokens": 230333,
+      "llama3_tokens": 87721,
+      "byte_parity": 1.6002074704917906,
+      "gpt2_parity": 4.363607085346215,
+      "llama3_parity": 1.65626947114023
+    }
+  }
+}
