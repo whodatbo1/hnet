@@ -16,9 +16,10 @@ total_tokens/step slope) rather than the raw total_tokens series, because
 total_tokens resets to 0 when a run resumes from a checkpoint.
 
 Usage:
-    python scripts/compute_bts.py --mono-run 1s2zdct4 --bi-run wvmobnka
-    python scripts/compute_bts.py ... --d-mono 6e9        # explicit budget
-    python scripts/compute_bts.py ... --metric bpb        # use val/bpb curves
+    python scripts/analysis/compute_bts.py --mono-run 1s2zdct4 --bi-run wvmobnka
+    python scripts/analysis/compute_bts.py ... --d-mono 6e9    # explicit budget
+    python scripts/analysis/compute_bts.py ... --metric bpb    # use val/bpb curves
+    python scripts/analysis/compute_bts.py ... --smooth 5      # 5-point moving average
 """
 
 import argparse
@@ -65,6 +66,20 @@ def val_curve(run, metric_key, tps):
     return steps * tps, losses
 
 
+def smooth(values, window):
+    """Centered moving average over `window` val points; the window shrinks
+    symmetrically at the edges so the array length and endpoints' locality are
+    preserved (no phase lag, no padding artifacts)."""
+    if window <= 1:
+        return values
+    half = window // 2
+    out = np.empty_like(values)
+    for i in range(len(values)):
+        lo, hi = max(0, i - half), min(len(values), i + half + 1)
+        out[i] = values[lo:hi].mean()
+    return out
+
+
 def first_crossing(tokens, losses, target):
     """Total tokens at which `losses` first reaches `target` (linear
     interpolation between the bracketing validation points), or None."""
@@ -90,6 +105,10 @@ def main():
     ap.add_argument("--metric", default="loss", choices=["loss", "bpb"], help="val metric used for matching")
     ap.add_argument("--d-mono", type=float, default=None,
                     help="target budget in tokens/bytes (default: every mono val point; final = largest)")
+    ap.add_argument("--smooth", type=int, default=1,
+                    help="centered moving-average window (in validation points) applied to "
+                         "BOTH loss curves before matching; damps val noise that makes the "
+                         "first-crossing optimistic. Odd values recommended; 1 = off (default).")
     args = ap.parse_args()
 
     api = wandb.Api()
@@ -101,9 +120,23 @@ def main():
     tps_mono, tps_bi = tokens_per_step(mono), tokens_per_step(bi)
     mono_tok, mono_loss = val_curve(mono, f"val/{args.metric}", tps_mono)
     bi_tok, bi_loss = val_curve(bi, f"val/{args.metric}/{args.target}", tps_bi)
-    # Target-language token counter of the bilingual run (for reporting)
+    if args.smooth > 1:
+        mono_loss = smooth(mono_loss, args.smooth)
+        bi_loss = smooth(bi_loss, args.smooth)
+        print(f"[smooth] {args.smooth}-point centered moving average applied to both curves")
+    # Target-language share of the bilingual run (for reporting). Derived from
+    # the slope of the per-language counter, not its raw value: total_tokens/*
+    # resets to 0 on resume, so ratios of raw values are biased low on
+    # merged/resumed runs.
     s = fetch_series(bi, [f"total_tokens/{args.target}", "step"])
-    tgt_frac = np.median(s[f"total_tokens/{args.target}"] / (s["step"] * tps_bi)) if len(s["step"]) else 0.5
+    tgt_frac = 0.5
+    if len(s["step"]) >= 2:
+        order = np.argsort(s["step"])
+        dt = np.diff(s[f"total_tokens/{args.target}"][order])
+        ds = np.diff(s["step"][order])
+        ok = (dt > 0) & (ds > 0)
+        if ok.any():
+            tgt_frac = float(np.median(dt[ok] / ds[ok]) / tps_bi)
 
     print(f"mono: {len(mono_tok)} val points up to {mono_tok[-1]/1e9:.2f}B tokens "
           f"(final val/{args.metric} = {mono_loss[-1]:.4f})")
