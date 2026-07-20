@@ -28,7 +28,7 @@ ortho_reg_lambda: 0.0     # Orthogonal regularization of BP matrices loss weight
 # parity from scripts/analysis/compute_language_parity.py; English N = 4).
 downsample_n: [
   {name: hplt-eng_Latn, value: 4},
-  {name: hplt-nld_Latn, value: 4.46}
+  {name: hplt-rus_Cyrl, value: 7.97}
 ]
 bm_loss_weight: 0.0          # Byte-modelling loss of encoder used for entropy routing
 
@@ -39,11 +39,11 @@ data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with d
 dataset_mixture: [
   {
     name: hplt-eng_Latn,
-    weight: 0.4727
+    weight: 0.3343
   },
   {
-    name: hplt-nld_Latn,
-    weight: 0.5273
+    name: hplt-rus_Cyrl,
+    weight: 0.6657
   }
 ]
 seq_len: 8192
@@ -56,7 +56,7 @@ num_workers: 8           # Dataloader workers (can use >0 with local data)
 
 # --- Training ---
 max_steps: null
-total_tokens: 52_882_000_000  # BTS budget: 25B x (1+1.1153 parity) = zero-transfer point 20B(1+p) +25% headroom, both directions
+total_tokens: 74_793_000_000  # BTS budget: 25B x (1+1.9917 parity) = zero-transfer point 20B(1+p) +25% headroom, both directions
 
 # --- Validation ---
 validate_every: 100       # Run validation every N steps (0 to disable)
@@ -64,14 +64,14 @@ val_fraction: 0.005       # Fraction of streaming documents reserved for validat
 val_batches: 128          # Number of micro-batches per validation run
 
 # --- Checkpointing ---
-checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/XXS/hnet_1stage_XXS_en_nl
+checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/XXS/hnet_1stage_XXS_en_rus
 save_every: 100
 resume: true
 
 # --- Logging ---
 log_every: 10
 wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
-wandb_run_name: "train_hnet_1stage_XXS_en_nl"
+wandb_run_name: "train_hnet_1stage_XXS_en_rus"
 
 # --- Memory ---
 activation_checkpointing: false

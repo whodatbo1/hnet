@@ -91,6 +91,33 @@
       "byte_parity": 1.6002074704917906,
       "gpt2_parity": 4.363607085346215,
       "llama3_parity": 1.65626947114023
+    },
+    "spa_Latn": {
+      "n_sentences": 2009,
+      "bytes": 312067,
+      "gpt2_tokens": 104698,
+      "llama3_tokens": 81747,
+      "byte_parity": 1.212447452464392,
+      "gpt2_parity": 1.983480155347163,
+      "llama3_parity": 1.5434737458225554
+    },
+    "rus_Cyrl": {
+      "n_sentences": 2009,
+      "bytes": 512640,
+      "gpt2_tokens": 301729,
+      "llama3_tokens": 86232,
+      "byte_parity": 1.9917167211891866,
+      "gpt2_parity": 5.716188311073221,
+      "llama3_parity": 1.6281555047863603
+    },
+    "jpn_Jpan": {
+      "n_sentences": 2009,
+      "bytes": 327157,
+      "gpt2_tokens": 156489,
+      "llama3_tokens": 80184,
+      "byte_parity": 1.271075349863629,
+      "gpt2_parity": 2.964649048025007,
+      "llama3_parity": 1.513962577648547
     }
   }
 }

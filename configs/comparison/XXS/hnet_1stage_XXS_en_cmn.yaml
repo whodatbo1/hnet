@@ -56,7 +56,7 @@ num_workers: 8           # Dataloader workers (can use >0 with local data)
 
 # --- Training ---
 max_steps: null
-total_tokens: 20_000_000_000
+total_tokens: 48_123_000_000  # BTS budget: 25B x (1+0.9249 parity) = zero-transfer point 20B(1+p) +25% headroom, both directions
 
 # --- Validation ---
 validate_every: 100       # Run validation every N steps (0 to disable)
