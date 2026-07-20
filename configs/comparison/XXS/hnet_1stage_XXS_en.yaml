@@ -26,24 +26,15 @@ ortho_reg_lambda: 0.0     # Orthogonal regularization of BP matrices loss weight
 # Expected downsampling factor N. Either a single scalar for all data, or a
 # per-language list keyed by dataset_mixture source name (4 x FLORES-200 byte
 # parity from scripts/analysis/compute_language_parity.py; English N = 4).
-downsample_n: [
-  {name: hplt-eng_Latn, value: 4},
-  {name: hplt-nld_Latn, value: 4.46}
-]
+downsample_n: 4.0
 bm_loss_weight: 0.0          # Byte-modelling loss of encoder used for entropy routing
 
 # --- Data ---
 data_dir: /scratch-shared/mivanov1/hnet/data  # Local data root (download with download_data.py)
-# Content-balanced mixture: w ~ FLORES byte parity, so each language
-# contributes equal information and equal main-network tokens per step.
 dataset_mixture: [
   {
     name: hplt-eng_Latn,
-    weight: 0.4727
-  },
-  {
-    name: hplt-nld_Latn,
-    weight: 0.5273
+    weight: 1.0
   }
 ]
 seq_len: 8192
@@ -64,14 +55,14 @@ val_fraction: 0.005       # Fraction of streaming documents reserved for validat
 val_batches: 128          # Number of micro-batches per validation run
 
 # --- Checkpointing ---
-checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/XXS/hnet_1stage_XXS_en_nl
+checkpoint_dir: /scratch-shared/mivanov1/hnet/checkpoints/train/comparison/XXS/hnet_1stage_XXS_en
 save_every: 100
 resume: true
 
 # --- Logging ---
 log_every: 10
 wandb_project: "hnet"      # Set to enable wandb (e.g. "hnet-training")
-wandb_run_name: "train_hnet_1stage_XXS_en_nl"
+wandb_run_name: "train_hnet_1stage_XXS_en"
 
 # --- Memory ---
 activation_checkpointing: false

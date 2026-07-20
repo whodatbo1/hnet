@@ -70,6 +70,73 @@ def load_balancing_loss(
         (true_ratio) * (average_prob) * (N-1)
     ) * N / (N-1)
 
+def multilingual_load_balancing_loss(
+    bpred_output: list[RoutingModuleOutput],
+    source_ids: torch.Tensor,
+    seq_len: int,
+    N_per_source: torch.Tensor,
+) -> torch.Tensor:
+    """Load balancing loss with a per-source (per-language) compression ratio N.
+
+    For every routing stage, each source's statistics (true_ratio,
+    average_prob) are computed over that source's positions only and plugged
+    into the same combiner as ``load_balancing_loss`` with that source's N.
+    Per-source values are combined weighted by position count, then averaged
+    over stages (mirroring the aggregate loss's mean over ``bpred_output``).
+
+    Note: even with all N equal this is not bit-identical to
+    ``load_balancing_loss`` on pooled batch statistics, because the combiner
+    is a product of means and is applied per source before the weighted
+    average rather than once on pooled means.
+
+    Position→source attribution across stages mirrors
+    ``PerSourceMetrics.update`` in train.py: bpred_output is ordered
+    outermost-first, and each stage's boundary_mask selects, in order, the
+    positions forwarded to the next stage.
+
+    Args:
+        bpred_output: RoutingModuleOutputs, outermost stage first.
+        source_ids: (B,) index of each row's source in the mixture.
+        seq_len: Number of positions per row at the outermost stage.
+        N_per_source: (n_sources,) target downsampling factor per source
+            (aligned with the source_ids indexing). All values must be > 1.
+
+    Returns:
+        A single tensor, the load balancing loss.
+    """
+    n_src = N_per_source.numel()
+    device = source_ids.device
+    row_ids = torch.arange(
+        source_ids.shape[0], device=device
+    ).repeat_interleave(seq_len)
+
+    total = torch.tensor(0.0, device=device)
+    for router_out in bpred_output:
+        lang = source_ids[row_ids]
+        p = router_out.boundary_prob[..., -1].float().reshape(-1)
+        bmask = router_out.boundary_mask.reshape(-1)
+
+        cnt = torch.zeros(n_src, device=device).index_add_(0, lang, torch.ones_like(p.detach()))
+        mask_sum = torch.zeros(n_src, device=device).index_add_(0, lang, bmask.float())
+        # Out-of-place index_add keeps the graph to boundary_prob intact.
+        prob_sum = torch.zeros(n_src, device=device).index_add(0, lang, p)
+
+        safe_cnt = cnt.clamp(min=1)
+        true_ratio = mask_sum / safe_cnt
+        average_prob = prob_sum / safe_cnt
+        N = N_per_source
+        lb = (
+            (1 - true_ratio) * (1 - average_prob)
+            + true_ratio * average_prob * (N - 1)
+        ) * N / (N - 1)
+        # Sources absent from this micro-batch have cnt=0 and contribute nothing.
+        total = total + (lb * cnt).sum() / cnt.sum().clamp(min=1)
+
+        row_ids = row_ids[bmask]
+
+    return total / len(bpred_output)
+
+
 def certainty_loss(router_output: RoutingModuleOutput) -> torch.Tensor:
     """
     Compute the binary entropy (certainty) loss over boundary probabilities.

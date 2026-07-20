@@ -35,7 +35,7 @@ from hnet.models.mixer_seq import HNetForCausalLM
 from hnet.models.config_hnet import AttnConfig, SSMConfig, RoutingConfig, HNetConfig
 from hnet.modules.block import Block
 from hnet.utils.data import create_dataloaders, create_sft_dataloaders
-from hnet.utils.train import load_balancing_loss, certainty_loss, group_params, orthogonality_regularization_soft, get_compression_ratio
+from hnet.utils.train import load_balancing_loss, multilingual_load_balancing_loss, certainty_loss, group_params, orthogonality_regularization_soft, get_compression_ratio
 from hnet.utils.eval import compression_metrics
 from hnet.modules.dc import RoutingModule
 
@@ -368,7 +368,12 @@ class PerSourceMetrics:
 
     @torch.no_grad()
     def update(self, logits, targets, bpred_output, source_ids, downsample_n):
-        """Bucket one micro-batch's metrics by source. Detached throughout."""
+        """Bucket one micro-batch's metrics by source. Detached throughout.
+
+        downsample_n is a scalar, or an (n_src,) tensor in per-source mode —
+        the lb combiner below broadcasts elementwise so each source's value
+        uses its own N.
+        """
         tok_loss = nn.functional.cross_entropy(
             logits.detach().reshape(-1, logits.size(-1)),
             targets.reshape(-1),
@@ -561,7 +566,8 @@ def load_config(argv=None):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
+def validate(model, val_dataloader, cfg, step, device, downsample_n=None,
+             downsample_n_map=None):
     """Run validation and return metrics dict.
 
     val_dataloader is either a single DataLoader (single-source / SFT runs) or
@@ -587,7 +593,7 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
     n_loaders = len(loaders)
 
     val_batches = cfg.get("val_batches", 50)
-    if downsample_n is None:
+    if downsample_n is None and downsample_n_map is None:
         downsample_n = cfg.downsample_n
 
     ortho_reg_lambda = cfg.get("ortho_reg_lambda", 0.0)
@@ -601,7 +607,14 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
     # Per-loader {metric_key: [per-batch values]}; rank-local (as before)
     comp_lists = [{} for _ in loaders]
 
-    for li, (_, loader) in enumerate(loaders):
+    for li, (name, loader) in enumerate(loaders):
+        # Mixture val loaders are single-source, so each can use its own N
+        # when a per-source downsample_n is configured.
+        loader_n = (
+            downsample_n_map[name]
+            if downsample_n_map is not None and name is not None
+            else downsample_n
+        )
         for batch_idx, batch in enumerate(loader):
             if batch_idx >= val_batches:
                 break
@@ -636,7 +649,7 @@ def validate(model, val_dataloader, cfg, step, device, downsample_n=None):
                 if output.bpred_output:
                     for router_out in output.bpred_output:
                         lb_loss = lb_loss + load_balancing_loss(
-                            router_out, N=downsample_n
+                            router_out, N=loader_n
                         )
                         cert_loss = cert_loss + certainty_loss(router_out)
                         if router_out.bm_loss is not None:
@@ -894,6 +907,35 @@ def main():
     if not sft and mixture is not None and len(mixture) > 1:
         source_names = [s["name"] for s in mixture]
 
+    # ---- Per-source downsample_n ----
+    # downsample_n is either a scalar (one N for all data) or a list of
+    # {name, value} entries keyed by mixture source name (per-language N,
+    # e.g. derived from byte parity). The per-source form only affects the
+    # load-balancing aux loss and train/val metrics — the model itself never
+    # consumes N, so inference is unchanged and needs no language knowledge.
+    downsample_n_map = None   # name -> N, used by validate()'s per-source loaders
+    downsample_n_vec = None   # (n_sources,) tensor aligned with source_names
+    if not isinstance(cfg.downsample_n, (int, float)):
+        entries = OmegaConf.to_container(cfg.downsample_n, resolve=True)
+        downsample_n_map = {e["name"]: float(e["value"]) for e in entries}
+        assert source_names is not None, (
+            "Per-source downsample_n requires a dataset_mixture with more than "
+            "one source (single-source and SFT runs use a scalar downsample_n)."
+        )
+        assert set(downsample_n_map) == set(source_names), (
+            f"downsample_n entries {sorted(downsample_n_map)} must match "
+            f"dataset_mixture sources {sorted(source_names)}"
+        )
+        assert all(n > 1 for n in downsample_n_map.values()), \
+            "downsample_n values must be > 1"
+        assert cfg.get("compression_schedule", None) is None, (
+            "compression_schedule is not supported together with per-source downsample_n"
+        )
+        downsample_n_vec = torch.tensor(
+            [downsample_n_map[name] for name in source_names], device=device
+        )
+        print_rank0(f"Per-source downsample_n: {downsample_n_map}", rank)
+
     # ---- Resume / warm-start ----
     # resume: continue this run (weights + optimizer + step). init_from: start a
     # fresh run from another checkpoint's weights only (continual PT / SFT).
@@ -976,11 +1018,14 @@ def main():
             pg["lr"] = base_lr * lr_scale
 
         compression_schedule = cfg.get("compression_schedule", None)
-        current_downsample_n = (
-            get_compression_ratio(step, max_steps, compression_schedule)
-            if compression_schedule is not None
-            else cfg.downsample_n
-        )
+        if downsample_n_vec is not None:
+            # Per-source mode: (n_sources,) tensor; broadcasts elementwise in
+            # PerSourceMetrics.update and indexes per source in the lb loss.
+            current_downsample_n = downsample_n_vec
+        elif compression_schedule is not None:
+            current_downsample_n = get_compression_ratio(step, max_steps, compression_schedule)
+        else:
+            current_downsample_n = cfg.downsample_n
 
         batch_entropy_means = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
         batch_entropy_stds = torch.zeros((num_stages, cfg.grad_accum_steps), device=device)
@@ -1026,9 +1071,10 @@ def main():
 
                 if output.bpred_output:
                     for router_out in output.bpred_output:
-                        lb_loss = lb_loss + load_balancing_loss(
-                            router_out, N=current_downsample_n
-                        )
+                        if downsample_n_vec is None:
+                            lb_loss = lb_loss + load_balancing_loss(
+                                router_out, N=current_downsample_n
+                            )
                         cert_loss = cert_loss + certainty_loss(router_out)
                         if router_out.entropy_mean is not None and router_out.entropy_std is not None:
                             batch_entropy_means[router_out.stage_idx, micro_step] = router_out.entropy_mean
@@ -1039,6 +1085,12 @@ def main():
                     lb_loss = lb_loss / len(output.bpred_output)
                     cert_loss = cert_loss / len(output.bpred_output)
                     bm_loss = bm_loss / len(output.bpred_output)
+                    if downsample_n_vec is not None:
+                        # Already averaged over stages inside the helper
+                        lb_loss = multilingual_load_balancing_loss(
+                            output.bpred_output, source_ids,
+                            targets.shape[1], downsample_n_vec,
+                        )
 
                 bm_loss_weight = cfg.get("bm_loss_weight", 0.1)
                 cert_loss_weight = cfg.get("cert_loss_weight", 0.0)
@@ -1142,6 +1194,14 @@ def main():
                 lang_metrics.update(lang_metrics_acc.total_metrics())
                 lang_metrics_acc.reset()
 
+            if downsample_n_vec is not None:
+                compression_ratio_log = {
+                    f"compression_ratio/{name}": downsample_n_map[name]
+                    for name in source_names
+                }
+            else:
+                compression_ratio_log = {"compression_ratio": current_downsample_n}
+
             if wandb_project and rank == 0:
                 import wandb
                 wandb.log({
@@ -1152,7 +1212,7 @@ def main():
                     "bm_loss": avg_bm,
                     "grad_norm": grad_norm,
                     "lr": current_lr,
-                    "compression_ratio": current_downsample_n,
+                    **compression_ratio_log,
                     "tokens_per_sec": tokens_per_sec,
                     "step": step,
                     "epoch": epoch,
@@ -1174,8 +1234,11 @@ def main():
             elapsed_time_since_last_log = 0
 
         if cfg.get("validate_every", 0) > 0 and step % cfg.validate_every == 0:
-            val_metrics = validate(model, val_dataloader, cfg, step, device,
-                                   downsample_n=current_downsample_n)
+            val_metrics = validate(
+                model, val_dataloader, cfg, step, device,
+                downsample_n=None if downsample_n_vec is not None else current_downsample_n,
+                downsample_n_map=downsample_n_map,
+            )
             if val_metrics and wandb_project and rank == 0:
                 import wandb
                 wandb.log(val_metrics)
